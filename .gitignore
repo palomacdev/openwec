@@ -1,9 +1,9 @@
-# ── Dados baixados (não vão pro repo) 
+#  Dados baixados (não vão pro repo) 
 raw/
 normalized/
 diag/
 
-# ── Catálogos gerados (regeneráveis pelos spiders) ──────────
+#  Catálogos gerados (regeneráveis pelos spiders) 
 catalog/wec/wec_catalog.json
 catalog/wec/sessions.json
 catalog/wec/seasons_events.json
@@ -29,7 +29,7 @@ catalog/imsa/sessions.json
 catalog/imsa/seasons_events.json
 catalog/imsa/ingest_log.json
 
-# ── Python ───────
+#  Python ─
 __pycache__/
 *.py[cod]
 *.pyo
@@ -40,16 +40,16 @@ env/
 dist/
 build/
 
-# ── IDEs ─────────
+#  IDEs ─
 .vscode/
 .idea/
 *.swp
 *.swo
 
-# ── OS 
+#  OS 
 .DS_Store
 Thumbs.db
 
-# ── Env / secrets 
+#  Env / secrets 
 .env
 *.env
