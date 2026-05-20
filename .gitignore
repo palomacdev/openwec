@@ -1,0 +1,55 @@
+# ── Dados baixados (não vão pro repo) 
+raw/
+normalized/
+diag/
+
+# ── Catálogos gerados (regeneráveis pelos spiders) ──────────
+catalog/wec/wec_catalog.json
+catalog/wec/sessions.json
+catalog/wec/seasons_events.json
+catalog/wec/ingest_log.json
+
+catalog/elms/catalog.json
+catalog/elms/sessions.json
+catalog/elms/seasons_events.json
+catalog/elms/ingest_log.json
+
+catalog/alms/catalog.json
+catalog/alms/sessions.json
+catalog/alms/seasons_events.json
+catalog/alms/ingest_log.json
+
+catalog/lemanscup/catalog.json
+catalog/lemanscup/sessions.json
+catalog/lemanscup/seasons_events.json
+catalog/lemanscup/ingest_log.json
+
+catalog/imsa/catalog.json
+catalog/imsa/sessions.json
+catalog/imsa/seasons_events.json
+catalog/imsa/ingest_log.json
+
+# ── Python ───────
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# ── IDEs ─────────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── OS 
+.DS_Store
+Thumbs.db
+
+# ── Env / secrets 
+.env
+*.env
