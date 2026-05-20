@@ -1,0 +1,23 @@
+services:
+
+  db:
+    image: timescale/timescaledb:latest-pg16
+    container_name: openwec-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: openwec
+      POSTGRES_PASSWORD: openwec
+      POSTGRES_DB: openwec
+    ports:
+      - "5432:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      - ../database/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U openwec -d openwec"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  db_data:
