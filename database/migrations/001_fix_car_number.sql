@@ -1,0 +1,4 @@
+﻿DROP VIEW IF EXISTS v_race_results;
+DROP VIEW IF EXISTS v_lap_records;
+DROP VIEW IF EXISTS v_driver_career;
+ALTER TABLE cars ALTER COLUMN number TYPE VARCHAR(10);

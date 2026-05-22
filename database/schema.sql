@@ -115,7 +115,7 @@ CREATE TABLE teams (
 
 CREATE TABLE cars (
     id              SERIAL PRIMARY KEY,
-    number          VARCHAR(4) NOT NULL,
+    number          VARCHAR(10) NOT NULL,
     team_id         INT REFERENCES teams(id),
     vehicle         VARCHAR(80),
     manufacturer    VARCHAR(60),
@@ -137,8 +137,8 @@ CREATE TABLE drivers (
     first_name              VARCHAR(60),
     last_name               VARCHAR(60),
     short_name              VARCHAR(20),
-    country                 VARCHAR(4),
-    license                 VARCHAR(20),
+    country                 VARCHAR(20),
+    license                 VARCHAR(40),
     hometown                VARCHAR(80),
     imsa_driver_id          INT,           -- IMSA internal ID (nullable)
     imsa_driver_plug_id     INT,
