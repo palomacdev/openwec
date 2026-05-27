@@ -71,7 +71,7 @@ results = session.results()        # DataFrame
 laps    = session.laps()           # DataFrame
 laps_50 = session.laps(car="50")  # filtered
 
-session.plot_lap_evolution(car="50")
+session.plot_lap_evolution(car="50") 
 session.plot_stint_chart()
 session.plot_gap_to_leader()
 ```

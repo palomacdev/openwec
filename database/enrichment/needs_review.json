@@ -1,0 +1,119 @@
+[
+  {
+    "wec_id": 4784,
+    "wec_name": "Jonny Adam",
+    "imsa_id": 40784,
+    "imsa_name": "Jonathan Adam",
+    "country": "GBR",
+    "rating": "Platinum",
+    "action": "merge"
+  },
+  {
+    "wec_id": 56,
+    "wec_name": "Benjamin Barker",
+    "imsa_id": 8524,
+    "imsa_name": "Ben Barker",
+    "country": "GBR",
+    "rating": "Silver",
+    "action": "merge"
+  },
+  {
+    "wec_id": 632,
+    "wec_name": "René Binder",
+    "imsa_id": 23826,
+    "imsa_name": "Rene Binder",
+    "country": "AUT",
+    "rating": "Gold",
+    "action": "merge"
+  },
+  {
+    "wec_id": 653,
+    "wec_name": "Timothé Buret",
+    "imsa_id": 34879,
+    "imsa_name": "Tim Buret",
+    "country": "FRA",
+    "rating": "Silver",
+    "action": "merge"
+  },
+  {
+    "wec_id": 1489,
+    "wec_name": "Nicholas Cassidy",
+    "imsa_id": 23917,
+    "imsa_name": "Nick Cassidy",
+    "country": "NZL",
+    "rating": "Gold",
+    "action": "merge"
+  },
+  {
+    "wec_id": 6011,
+    "wec_name": "Mateo Cressoni",
+    "imsa_id": 9702,
+    "imsa_name": "Matteo Cressoni",
+    "country": "ITA",
+    "rating": "Silver",
+    "action": "merge"
+  },
+  {
+    "wec_id": 1194,
+    "wec_name": "Robert Foley",
+    "imsa_id": 18565,
+    "imsa_name": "Robby Foley",
+    "country": "USA",
+    "rating": "Gold",
+    "action": "merge"
+  },
+  {
+    "wec_id": 3304,
+    "wec_name": "Benjamin Hanley",
+    "imsa_id": 9804,
+    "imsa_name": "Ben Hanley",
+    "country": "GBR",
+    "rating": "Gold",
+    "action": "merge"
+  },
+  {
+    "wec_id": 4760,
+    "wec_name": "Daniel Harper",
+    "imsa_id": 59744,
+    "imsa_name": "Dan Harper",
+    "country": "GBR",
+    "rating": null,
+    "action": "merge"
+  },
+  {
+    "wec_id": 5358,
+    "wec_name": "Gerald Kraut",
+    "imsa_id": 44488,
+    "imsa_name": "Gerry Kraut",
+    "country": "USA",
+    "rating": "Bronze",
+    "action": "merge"
+  },
+  {
+    "wec_id": 1419,
+    "wec_name": "René Rast",
+    "imsa_id": 9623,
+    "imsa_name": "Rene Rast",
+    "country": "AUT",
+    "rating": "Platinum",
+    "action": "merge"
+  },
+  {
+    "wec_id": 663,
+    "wec_name": "Nicholas Tandy",
+    "imsa_id": 6497,
+    "imsa_name": "Nick Tandy",
+    "country": "GBR",
+    "rating": "Platinum",
+    "action": "merge"
+  },
+  {
+    "wec_id": 2578,
+    "wec_name": "Donald Yount",
+    "imsa_id": 6461,
+    "imsa_name": "Don Yount",
+    "country": "USA",
+    "rating": "Bronze",
+    "action": "merge"
+  }
+]
