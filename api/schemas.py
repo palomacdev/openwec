@@ -56,6 +56,7 @@ class ResultOut(BaseModel):
     car_class:       Optional[str]
     vehicle:         Optional[str]
     team:            Optional[str]
+    tyre_supplier:   Optional[str]
     status:          str
     laps_completed:  Optional[int]
     total_time_s:    Optional[float]

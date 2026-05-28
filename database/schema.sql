@@ -122,6 +122,7 @@ CREATE TABLE cars (
     car_class       VARCHAR(20),        -- HYPERCAR, LMP2, LMGT3, GTP, GTD...
     car_group       VARCHAR(20),
     tires           VARCHAR(10),
+    tyre_supplier   VARCHAR(20),
     imsa_car_id     INT,               -- IMSA internal ID (nullable)
     imsa_team_id    INT,               -- IMSA internal ID (nullable)
     created_at      TIMESTAMPTZ DEFAULT NOW()

@@ -31,6 +31,7 @@ def get_results(session_id: int, cur=Depends(get_cursor)):
             c.vehicle,
             t.name          AS team,
             r.status::text  AS status,
+            c.tyre_supplier,
             r.laps_completed,
             r.total_time_s,
             r.gap_to_first_s,
