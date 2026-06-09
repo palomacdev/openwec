@@ -478,7 +478,11 @@ def find_classification_sessions(raw_dir: Path, series_key: str) -> list[dict]:
                         if not session_dir.is_dir():
                             continue
                         session_name = session_dir.name
+                        # class_dir = session_dir / "classification"
+                        # csv = get_final_classification(class_dir)
                         class_dir = session_dir / "classification"
+                        if not class_dir.exists():
+                            class_dir = session_dir / "other"
                         csv = get_final_classification(class_dir)
                         if csv:
                             sessions.append({
@@ -492,7 +496,11 @@ def find_classification_sessions(raw_dir: Path, series_key: str) -> list[dict]:
                     if not session_dir.is_dir():
                         continue
                     session_name = session_dir.name
+                    # class_dir = session_dir / "classification"
+                    # csv = get_final_classification(class_dir)
                     class_dir = session_dir / "classification"
+                    if not class_dir.exists():
+                        class_dir = session_dir / "other"
                     csv = get_final_classification(class_dir)
                     if csv:
                         sessions.append({

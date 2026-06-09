@@ -135,7 +135,8 @@ def get_final_analysis(analysis_dir: Path) -> Path | None:
     """
     if not analysis_dir.exists():
         return None
-
+    
+    # For others
     all_csvs = list(analysis_dir.rglob("*.CSV"))
     if not all_csvs:
         all_csvs = list(analysis_dir.rglob("*.csv"))
@@ -157,10 +158,40 @@ def get_final_analysis(analysis_dir: Path) -> Path | None:
 
     return max(all_csvs, key=hour_key)
 
+    # Only analysis files (prefix 23_) ALMS 
+    # all_csvs = [
+    #     p for p in analysis_dir.rglob("*.CSV")
+    #     if p.name.lower().startswith("23_")
+    # ]
+    # if not all_csvs:
+    #     all_csvs = [
+    #         p for p in analysis_dir.rglob("*.csv")
+    #         if p.name.lower().startswith("23_")
+    #     ]
+    # if not all_csvs:
+    #     return None
+
+    # if len(all_csvs) == 1:
+    #     return all_csvs[0]
+
+    # def hour_key(p: Path) -> int:
+    #     for text in [p.parent.name, p.name]:
+    #         m = re.search(r"[Hh]our\s*(\d+)", text)
+    #         if m:
+    #             return int(m.group(1))
+    #         m = re.match(r"(\d+)_", text)
+    #         if m:
+    #             return int(m.group(1))
+    #     return 0
+
+    # return max(all_csvs, key=hour_key)
+
 
 # ── DB lookups ────────────────────────────────────────────────
 
 def get_session_id(cur, series_key: str, season_raw: str, event_raw: str, session_name: str) -> int | None:
+    print(f"    LOOKUP: series={series_key} season={season_raw} event={event_raw} session={session_name}")
+
     cur.execute("""
         SELECT s.id FROM sessions s
         JOIN events e   ON e.id = s.event_id
@@ -225,7 +256,11 @@ def find_analysis_sessions(raw_dir: Path) -> list[dict]:
                 if not session_dir.is_dir():
                     continue
                 session_name = session_dir.name
+                print(f"  DISK: season={season_raw} event={event_raw} session='{session_name}'")
+
                 analysis_dir = session_dir / "analysis"
+                if not analysis_dir.exists():
+                    analysis_dir = session_dir / "other"
                 csv = get_final_analysis(analysis_dir)
                 if csv:
                     sessions.append({
@@ -309,6 +344,7 @@ INSERT_SQL = """
 
 
 def process_session(cur, series_key: str, sess: dict, dry_run: bool) -> dict:
+    print(f"    PROCESS: {sess['season_raw']}/{sess['event_raw']}/{sess['session_name']} → csv={sess['csv_path'].name}")
     csv_path     = sess["csv_path"]
     season_raw   = sess["season_raw"]
     event_raw    = sess["event_raw"]
@@ -319,6 +355,7 @@ def process_session(cur, series_key: str, sess: dict, dry_run: bool) -> dict:
         return {"status": "empty"}
 
     session_id = get_session_id(cur, series_key, season_raw, event_raw, session_name)
+    print(f"    SESSION_ID: {session_id}")
     if not session_id:
         return {"status": "no_session_match"}
 
