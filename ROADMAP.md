@@ -8,20 +8,20 @@
 *Goal: turn raw timing data into a real driver and team database.*
 
 #### Driver enrichment
-- [ ] Scrape RacingSportsCars for driver profiles
-- [ ] Map nationality, full name, birth year
-- [ ] Fix compound name parsing (Van/De/Di/El particles)
-- [ ] Link drivers across series (same person, different spellings)
-- [ ] Add Driver Database as secondary source
+- [x] Scrape RacingSportsCars for driver profiles
+- [x] Map nationality, full name, birth year
+- [x] Fix compound name parsing (Van/De/Di/El particles)
+- [x] Link drivers across series (same person, different spellings)
+- [x] Add Driver Database as secondary source
 
 #### Team enrichment
-- [ ] Normalize team names across seasons (e.g. "AF Corse" vs "Ferrari AF Corse")
-- [ ] Map manufacturer per team per season
-- [ ] Add team nationality
+- [x] Normalize team names across seasons (e.g. "AF Corse" vs "Ferrari AF Corse")
+- [x] Map manufacturer per team per season
+- [x] Add team nationality
 
 #### Car enrichment
-- [ ] Link car number to chassis ID where available
-- [ ] Map tyre compound codes (M, P, G → Michelin, Pirelli, Goodyear)
+- [x] Link car number to chassis ID where available
+- [x] Map tyre compound codes (M, P, G → Michelin, Pirelli, Goodyear)
 
 #### API additions
 - [ ] `GET /drivers/{id}` — driver profile + career stats
@@ -34,9 +34,9 @@
 *Goal: generate insights that analysts currently do manually in Excel.*
 
 #### Stint analysis
-- [ ] Detect stint boundaries from pit lap flags
+- [x] Detect stint boundaries from pit lap flags
 - [ ] Calculate stint length, average pace, degradation rate
-- [ ] Expose via `GET /sessions/{id}/stints`
+- [x] Expose via `GET /sessions/{id}/stints`
 
 #### Lap time analytics
 - [ ] Driver consistency score (lap time variance per stint)
@@ -49,10 +49,10 @@
 - [ ] Class comparison (HYPERCAR vs LMGT3 relative pace)
 
 #### Pre-built queries (API)
-- [ ] `GET /sessions/{id}/stints` — stint breakdown per car
-- [ ] `GET /sessions/{id}/pace` — average green flag pace per car
-- [ ] `GET /sessions/{id}/gaps` — gap evolution over laps
-- [ ] `GET /drivers/{id}/consistency` — variance stats across sessions
+- [x] `GET /sessions/{id}/stints` — stint breakdown per car
+- [x] `GET /sessions/{id}/pace` — average green flag pace per car
+- [x] `GET /sessions/{id}/gaps` — gap evolution over laps
+- [x] `GET /drivers/{id}/consistency` — variance stats across sessions
 
 ---
 
