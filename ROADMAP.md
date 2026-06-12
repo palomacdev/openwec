@@ -39,13 +39,13 @@
 - [x] Expose via `GET /sessions/{id}/stints`
 
 #### Lap time analytics
-- [ ] Driver consistency score (lap time variance per stint)
+- [x] Driver consistency score (lap time variance per stint)
 - [ ] Pace delta between drivers in same car
-- [ ] Green flag vs yellow flag lap filtering
+- [x] Green flag vs yellow flag lap filtering
 
 #### Race analytics
-- [ ] Pit window estimator (optimal lap range for stops)
-- [ ] Gap evolution over race distance
+- [x] Pit window estimator (optimal lap range for stops)
+- [x] Gap evolution over race distance
 - [ ] Class comparison (HYPERCAR vs LMGT3 relative pace)
 
 #### Pre-built queries (API)
