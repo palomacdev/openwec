@@ -31,22 +31,22 @@ class EventOut(BaseModel):
 
 
 class SessionOut(BaseModel):
-    id:           int
-    raw_id:       str
-    name:         str
-    session_type: str
-    session_at:   Optional[str]
-    imsa_series:  Optional[str]
+    id:            int
+    raw_id:        str
+    name:          str
+    session_type:  str
+    session_at:    Optional[str]
+    imsa_series:   Optional[str]
     snapshot_hour: Optional[int]
 
 
 # ── Results ───────────────────────────────────────────────────
 
 class DriverSlot(BaseModel):
-    slot:       int
-    first_name: str
-    last_name:  str
-    country:    Optional[str]
+    slot:        int
+    first_name:  str
+    last_name:   str
+    country:     Optional[str]
     imsa_rating: Optional[str]
 
 
@@ -70,21 +70,21 @@ class ResultOut(BaseModel):
 # ── Laps ─────────────────────────────────────────────────────
 
 class LapOut(BaseModel):
-    car_number:   str
-    driver_name:  Optional[str]
-    lap_number:   int
-    lap_time_s:   Optional[float]
-    s1_s:         Optional[float]
-    s2_s:         Optional[float]
-    s3_s:         Optional[float]
-    kph:          Optional[float]
-    top_speed_kph: Optional[float]
-    lap_improvement:           bool
-    crossing_finish_in_pit:    bool
-    flag_at_fl:   Optional[str]
-    pit_time_s:   Optional[float]
-    elapsed_raw:  Optional[str]
-    hour_raw:     Optional[str]
+    car_number:              str
+    driver_name:             Optional[str]
+    lap_number:              int
+    lap_time_s:              Optional[float]
+    s1_s:                    Optional[float]
+    s2_s:                    Optional[float]
+    s3_s:                    Optional[float]
+    kph:                     Optional[float]
+    top_speed_kph:           Optional[float]
+    lap_improvement:         bool
+    crossing_finish_in_pit:  bool
+    flag_at_fl:              Optional[str]
+    pit_time_s:              Optional[float]
+    elapsed_raw:             Optional[str]
+    hour_raw:                Optional[str]
 
 
 # ── Pagination ────────────────────────────────────────────────

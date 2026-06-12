@@ -38,6 +38,7 @@ app.include_router(results.router,  prefix="/api/v1")
 app.include_router(laps.router,     prefix="/api/v1")
 app.include_router(analytics.router, prefix="/api/v1")
 
+
 @app.get("/", tags=["health"])
 def root():
     return {
