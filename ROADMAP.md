@@ -24,9 +24,9 @@
 - [x] Map tyre compound codes (M, P, G → Michelin, Pirelli, Goodyear)
 
 #### API additions
-- [ ] `GET /drivers/{id}` — driver profile + career stats
-- [ ] `GET /drivers/{id}/results` — full race history
-- [ ] `GET /teams/{id}` — team profile + season history
+- [x] `GET /drivers/{id}` — driver profile + career stats
+- [x] `GET /drivers/{id}/results` — full race history
+- [x] `GET /teams/{id}` — team profile + season history
 
 ---
 
