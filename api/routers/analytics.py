@@ -116,6 +116,14 @@ class DriverConsistency(BaseModel):
     green_flag_laps: int
 
 
+class RaceControlPeriod(BaseModel):
+    flag:          str    # 'FCY' or 'Other' (Safety Car)
+    label:         str    # human-readable label
+    start_lap:     int
+    end_lap:       int
+    duration_laps: int
+
+
 # ── Helpers ───────────────────────────────────────────────────
 
 def estimate_window(
@@ -477,3 +485,84 @@ def get_driver_consistency(
     if not rows:
         raise HTTPException(404, f"No consistency data found for driver {driver_id}.")
     return [DriverConsistency(**dict(r)) for r in rows]
+
+
+FLAG_LABELS = {
+    "FCY":   "Full Course Yellow",
+    "Other": "Safety Car",
+}
+
+
+@router.get(
+    "/sessions/{session_id}/race-control",
+    response_model=list[RaceControlPeriod],
+    dependencies=[Depends(require_api_key)],
+)
+def get_race_control(session_id: int, cur=Depends(get_cursor)):
+    """
+    Detects SC / FCY periods for a session.
+    Uses the most common flag_at_fl value across all cars for each lap
+    (track-wide flags should be consistent across the field).
+    Returns contiguous non-green periods.
+    """
+    cur.execute("SELECT id FROM sessions WHERE id = %s", (session_id,))
+    if not cur.fetchone():
+        raise HTTPException(404, f"Session {session_id} not found.")
+
+    cur.execute("""
+        SELECT lap_number, flag_at_fl::text AS flag, COUNT(*) AS cnt
+        FROM laps
+        WHERE session_id = %s AND flag_at_fl IS NOT NULL
+        GROUP BY lap_number, flag_at_fl
+        ORDER BY lap_number
+    """, (session_id,))
+    rows = cur.fetchall()
+
+    if not rows:
+        raise HTTPException(404, "No flag data found for this session.")
+
+    # Mode (most common flag) per lap
+    lap_flags: dict[int, list[tuple[str, int]]] = defaultdict(list)
+    for r in rows:
+        lap_flags[r["lap_number"]].append((r["flag"], r["cnt"]))
+
+    mode_per_lap = {
+        lap: max(flags, key=lambda x: x[1])[0]
+        for lap, flags in lap_flags.items()
+    }
+
+    # Group contiguous non-GF periods
+    periods: list[dict] = []
+    current: Optional[dict] = None
+
+    for lap in sorted(mode_per_lap.keys()):
+        flag = mode_per_lap[lap]
+        if flag == "GF":
+            if current:
+                periods.append(current)
+                current = None
+            continue
+
+        if current and current["flag"] == flag and lap == current["end_lap"] + 1:
+            current["end_lap"] = lap
+        else:
+            if current:
+                periods.append(current)
+            current = {"flag": flag, "start_lap": lap, "end_lap": lap}
+
+    if current:
+        periods.append(current)
+
+    if not periods:
+        raise HTTPException(404, "No SC/FCY periods found — race was green throughout.")
+
+    return [
+        RaceControlPeriod(
+            flag=p["flag"],
+            label=FLAG_LABELS.get(p["flag"], p["flag"]),
+            start_lap=p["start_lap"],
+            end_lap=p["end_lap"],
+            duration_laps=p["end_lap"] - p["start_lap"] + 1,
+        )
+        for p in periods
+    ]
