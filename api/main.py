@@ -12,7 +12,7 @@ Docs:
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api.routers import series, sessions, results, laps, analytics, drivers_teams
+from api.routers import series, sessions, results, laps, analytics, drivers_teams, api_keys
 
 
 
@@ -38,6 +38,7 @@ app.include_router(results.router,  prefix="/api/v1")
 app.include_router(laps.router,     prefix="/api/v1")
 app.include_router(analytics.router, prefix="/api/v1")
 app.include_router(drivers_teams.router, prefix="/api/v1")
+app.include_router(api_keys.router, prefix="/api/v1")
 
 
 @app.get("/", tags=["health"])

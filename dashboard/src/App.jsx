@@ -6,9 +6,9 @@ import LapEvolutionChart from './components/LapEvolutionChart'
 import GapChart from './components/GapChart'
 import RaceControl from './components/RaceControl'
 
-// Le Mans 2024 — WEC Round, Race session
-const EVENT_ID   = 97
-const SESSION_ID = 692
+// Le Mans 2026 — WEC Round, Race session
+const EVENT_ID   = 621
+const SESSION_ID = 6556
 const CLASSES    = ['HYPERCAR', 'LMP2', 'LMGT3']
 
 export default function App() {

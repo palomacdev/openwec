@@ -2,9 +2,9 @@
 OpenWEC — Lemans Cup Catalog Spider + Downloader
 The Michelin Le Mans Cup — lemanscup.alkamelsystems.com
 
-Mesma arquitetura do WEC. Só muda BASE_URL e RAW_DIR.
+Same architecture as WEC. Only changes are BASE_URL and RAW_DIR.
 
-Uso:
+Usage:
     python lemanscup_collect.py --action catalog
     python lemanscup_collect.py --action download --workers 4
     python lemanscup_collect.py --action catalog download --workers 4

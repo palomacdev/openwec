@@ -1,27 +1,27 @@
 """
 OpenWEC — Catalog Spider v3 
 
-O diagnóstico DOM revelou:
-  - Navegação feita por <select name="season"> e <select name="evvent">
-  - Arquivos estão em <a href="Results/..."> como paths relativos
-  - A página renderiza server-side para a combinação season+event da query string
-  - Logo: basta fazer GET em ?season=X&evvent=Y para cada combinação
+DOM diagnostics revealed:
+- Navigation done by `<select name="season">` and `<select name="evvent">`
+- Files are in `<a href="Results/...">` as relative paths
+- The page is rendered on the server for the season + event combination of the query string
+- Therefore: just do a GET on `?season=X&evvent=Y` for each combination
 
-Vantagens vs Playwright:
-  - 10x mais rápido (sem browser headless)
-  - Sem dependência de JS render timing
-  - Funciona com aiohttp puro + BeautifulSoup
+Advantages compared to Playwright:
+- 10 times faster (without headless browser)
+- No dependency on JS rendering time
+- Works with pure aiohttp + BeautifulSoup
 
-Bônus descoberto: seasons vão de 2011 a 2026, não só 2018+.
+Bonus discovered: seasons range from 2011 to 2026, not just 2018 onwards.
 
-Uso:
+Usage:
     pip install aiohttp beautifulsoup4 aiofiles
     python catalog_spider_v3.py [--season 13_2024] [--from-season 12_2023]
 
 Output:
     catalog/wec_catalog.json
     catalog/sessions.json
-    catalog/seasons_events.json   ← índice completo seasons × eventos
+    catalog/seasons_events.json   ← Full index of seasons × events
 """
 
 import asyncio

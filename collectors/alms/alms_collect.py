@@ -2,9 +2,9 @@
 OpenWEC — ALMS Catalog Spider + Downloader
 Asian Le Mans Series — alms.alkamelsystems.com
 
-Mesma arquitetura do WEC. Só muda BASE_URL e RAW_DIR.
+Same architecture as WEC. Only BASE_URL and RAW_DIR are different.
 
-Uso:
+Usage:
     python alms_collect.py --action catalog
     python alms_collect.py --action download --workers 4
     python alms_collect.py --action catalog download --workers 4

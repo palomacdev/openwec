@@ -53,9 +53,13 @@ Thumbs.db
 #  Env / secrets 
 .env
 *.env
+*.env.production
 
 # node_modules 
 node_modules/
 
 # vm
 CREDENTIALS.local.md
+
+# db vm *.dump
+*.dump

@@ -230,7 +230,8 @@ CREATE TABLE laps (
 
     created_at                  TIMESTAMPTZ DEFAULT NOW(),
 
-    PRIMARY KEY (id, lap_recorded_at)
+    PRIMARY KEY (id, lap_recorded_at),
+    UNIQUE (session_id, car_id, lap_number)
 );
 
 -- TimescaleDB hypertable (run after CREATE TABLE)

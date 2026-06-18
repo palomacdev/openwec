@@ -1,8 +1,8 @@
 """
 OpenWEC — Historical Downloader v2
-Baixa Classification + Analysis CSVs de todas as seasons/eventos.
+Download Classification + Analysis CSVs of all seasons/events.
 
-Estrutura de output:
+Output structure:
     raw/
       wec/
         13_2024/
@@ -11,15 +11,15 @@ Estrutura de output:
             analysis/         ← 23_Analysis_*.CSV
             weather/          ← 26_Weather_*.CSV
 
-Uso:
+Usage:
     pip install aiohttp aiofiles beautifulsoup4
     python download_all.py [--season 13_2024] [--workers 4] [--dry-run]
 
 Flags:
-    --season    só essa temporada
-    --workers   downloads paralelos (default: 4, máx recomendado: 6)
-    --dry-run   mostra o que baixaria sem baixar
-    --resume    pula arquivos já baixados (default: True)
+    --season   only this season
+    --workers   parallel downloads (default: 4, max recommended: 6)
+    --dry-run   shows what would be downloaded without downloading
+    --resume    skips files that are already downloaded (default: True)
 """
 
 import asyncio
@@ -34,9 +34,9 @@ import aiohttp
 import aiofiles
 
 
-CATALOG_PATH = Path("catalog/sessions.json")
+CATALOG_PATH = Path("catalog/wec/sessions.json")
 RAW_DIR      = Path("raw/wec")
-INGEST_LOG   = Path("catalog/ingest_log.json")
+INGEST_LOG   = Path("catalog/wec/ingest_log.json")
 
 BASE_URL = "https://fiawec.alkamelsystems.com/"
 HEADERS  = {
