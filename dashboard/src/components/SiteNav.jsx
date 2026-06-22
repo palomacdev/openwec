@@ -8,10 +8,11 @@ export default function SiteNav() {
         <span className="mono" style={{ color: 'var(--text)', fontWeight: 700, fontSize: 15, letterSpacing: '0.12em' }}>WEC</span>
       </Link>
       <div className="home-nav-links">
+        <Link to="/explore">Explore</Link>
         <Link to="/about">About</Link>
-        <Link to="/dashboard">Dashboard</Link>
         <a href="https://api.openwec.com/docs" target="_blank" rel="noopener noreferrer">API</a>
         <a href="https://github.com/your-username/openwec" target="_blank" rel="noopener noreferrer">GitHub</a>
+        <Link to="/dashboard">Dashboard</Link>
       </div>
     </nav>
   )

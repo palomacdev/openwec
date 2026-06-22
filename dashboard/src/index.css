@@ -777,6 +777,71 @@ a {
   letter-spacing: 0.04em;
 }
 
+/* ── Explore page ───────────────────────────────────────── */
+
+.explore-selectors {
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+}
+
+.explore-selector-group {
+  display: flex;
+  align-items: flex-start;
+  gap: 24px;
+}
+
+.selector-label {
+  width: 80px;
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--accent);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  padding-top: 8px;
+}
+
+.selector-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.selector-pill {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  padding: 6px 14px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.selector-pill:hover {
+  border-color: var(--text-dim);
+  color: var(--text);
+}
+
+.selector-pill.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--surface-2);
+}
+
+@media (max-width: 700px) {
+  .explore-selector-group {
+    flex-direction: column;
+    gap: 8px;
+  }
+  .selector-label {
+    width: auto;
+    padding-top: 0;
+  }
+}
+
 /* ── About page ─────────────────────────────────────────── */
 
 .about-header {

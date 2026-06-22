@@ -7,6 +7,7 @@ export default function SiteFooter() {
         <span style={{ color: 'var(--accent)' }}>OPEN</span>WEC
       </div>
       <div className="footer-links">
+        <Link to="/explore">Explore</Link>
         <Link to="/about">About</Link>
         <a href="https://api.openwec.com/docs" target="_blank" rel="noopener noreferrer">API</a>
         <a href="https://github.com/palomacdev/openwec" target="_blank" rel="noopener noreferrer">GitHub</a>

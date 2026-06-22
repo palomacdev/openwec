@@ -53,7 +53,7 @@ export default function Home() {
             REST API, Python SDK, live dashboard.
           </p>
           <div className="hero-ctas">
-            <Link to="/dashboard" className="cta-primary">Explore the data →</Link>
+            <Link to="/explore" className="cta-primary">Explore the data →</Link>
             <a href="https://api.openwec.com/docs" className="cta-secondary" target="_blank" rel="noopener noreferrer">API docs</a>
           </div>
         </div>
@@ -84,8 +84,8 @@ export default function Home() {
             ))}
           </div>
           <div className="tower-footer mono">
-            <Link to="/dashboard" style={{ color: 'var(--accent)', fontSize: 11 }}>
-              View full dashboard →
+            <Link to="/explore" style={{ color: 'var(--accent)', fontSize: 11 }}>
+              View full explore →
             </Link>
           </div>
         </div>
