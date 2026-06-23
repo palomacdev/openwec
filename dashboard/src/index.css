@@ -777,6 +777,195 @@ a {
   letter-spacing: 0.04em;
 }
 
+/* ── API Keys page ──────────────────────────────────────── */
+
+.apikey-layout {
+  display: grid;
+  grid-template-columns: 1fr 420px;
+  gap: 48px;
+  align-items: start;
+}
+
+/* Endpoint table */
+.endpoint-table {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.endpoint-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.endpoint-badge {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  padding: 2px 8px;
+  border-radius: 3px;
+  flex-shrink: 0;
+  width: 40px;
+  text-align: center;
+}
+
+.endpoint-badge.public {
+  background: var(--surface-2);
+  color: var(--text-dim);
+}
+
+.endpoint-badge.auth {
+  background: rgba(255, 176, 0, 0.12);
+  color: var(--accent);
+}
+
+.endpoint-label {
+  flex: 1;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.endpoint-path {
+  font-size: 11px;
+  color: var(--text-dim);
+  letter-spacing: 0.02em;
+}
+
+/* Form */
+.apikey-form-wrap {
+  position: sticky;
+  top: 24px;
+}
+
+.apikey-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.form-label {
+  font-size: 11px;
+  color: var(--text-dim);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.form-input {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 13px;
+  padding: 10px 12px;
+  border-radius: 4px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.form-input:focus {
+  border-color: var(--accent);
+}
+
+.form-textarea {
+  resize: vertical;
+  min-height: 72px;
+}
+
+.form-error {
+  font-size: 12px;
+  color: var(--hypercar);
+  padding: 8px 12px;
+  background: rgba(230, 57, 70, 0.08);
+  border-radius: 4px;
+}
+
+.form-note {
+  font-size: 11px;
+  color: var(--text-dim);
+  line-height: 1.6;
+  margin-top: 16px;
+  letter-spacing: 0.02em;
+}
+
+/* Success state */
+.key-success {
+  text-align: center;
+  padding: 8px 0;
+}
+
+.key-success-icon {
+  font-size: 32px;
+  color: var(--lmgt3);
+  margin-bottom: 16px;
+}
+
+.key-display {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 12px;
+  margin-bottom: 12px;
+}
+
+.key-value {
+  flex: 1;
+  font-size: 12px;
+  color: var(--accent);
+  word-break: break-all;
+  text-align: left;
+}
+
+.key-copy-btn {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: 3px;
+  cursor: pointer;
+  flex-shrink: 0;
+  letter-spacing: 0.06em;
+}
+
+.key-copy-btn:hover {
+  color: var(--text);
+  border-color: var(--text-dim);
+}
+
+.key-usage-hint {
+  font-size: 11px;
+  color: var(--text-dim);
+  text-align: left;
+  background: var(--surface-2);
+  padding: 8px 12px;
+  border-radius: 4px;
+  word-break: break-all;
+}
+
+@media (max-width: 900px) {
+  .apikey-layout {
+    grid-template-columns: 1fr;
+  }
+  .apikey-form-wrap {
+    position: static;
+  }
+  .endpoint-path {
+    display: none;
+  }
+}
+
 /* ── Explore page ───────────────────────────────────────── */
 
 .explore-selectors {
