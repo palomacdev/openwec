@@ -11,11 +11,11 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     # Database
-    db_host:     str = "127.0.0.1"
-    db_port:     int = 5433
-    db_name:     str = "openwec"
-    db_user:     str = "openwec"
-    db_password: str = "openwec"
+    db_host:     str = "127.0.0.1"  # override via DB_HOST env var
+    db_port:     int = 5433         # override via DB_HOST env var
+    db_name:     str = "openwec"    # override via DB_HOST env var
+    db_user:     str = "openwec"    # override via DB_HOST env var
+    db_password: str = "openwec"    # override via DB_HOST env var - CHANGE THIS IN PRODUCTION
 
     # API Keys — comma-separated list of valid keys
     # Example: API_KEYS="key1,key2,key3"
