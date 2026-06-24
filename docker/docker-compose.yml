@@ -1,3 +1,11 @@
+# OpenWEC — Local Development
+# Production uses a separate compose on the VM with env_file.
+#
+# Usage:
+#   docker compose -f docker/docker-compose.yml up -d 
+#   docker compose -f docker/docker-compose.yml down 
+
+
 services:
 
   db:
@@ -5,18 +13,18 @@ services:
     container_name: openwec-db
     restart: unless-stopped
     environment:
-      POSTGRES_USER: openwec
-      POSTGRES_PASSWORD: openwec
-      POSTGRES_DB: openwec
+      POSTGRES_USER:     ${DB_USER:-openwec}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-openwec}
+      POSTGRES_DB:       ${DB_NAME:-openwec}
       LANG: en_US.utf8
       LC_ALL: en_US.utf8
     ports:
-      - "5433:5432"
+       - "${DB_PORT:-5433}:5432"
     volumes:
       - db_data:/var/lib/postgresql/data
       - ../database/schema.sql:/docker-entrypoint-initdb.d/schema.sql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U openwec -d openwec"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-openwec} -d ${DB_NAME:-openwec}"]
       interval: 10s
       timeout: 5s
       retries: 5

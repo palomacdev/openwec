@@ -22,13 +22,7 @@ import psycopg2.extras
 from collections import defaultdict
 
 
-DB_CONFIG = {
-    "host":     "127.0.0.1",
-    "port":     5433,
-    "dbname":   "openwec",
-    "user":     "openwec",
-    "password": "openwec",
-}
+from database.db import DB_CONFIG
 
 # Particles that belong to the last name
 # Sorted longest first to match "VAN DER" before "VAN"

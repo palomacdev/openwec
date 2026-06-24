@@ -27,17 +27,11 @@ from datetime import datetime
 from pathlib import Path
 
 import psycopg
+from database.db import DB_CONFIG
 
 
 # ── Config ───────────────────────────────────────────────────
-DB_CONFIG = {
-    "host":     "127.0.0.1",
-    "port":     5433,
-    "dbname":   "openwec",
-    "user":     "openwec",
-    "password": "openwec",
-    "client_encoding": "utf8",
-}
+
 
 CATALOG_FILES = {
     "WEC":       Path(r"C:\dev\openwec\catalog\wec\sessions.json"),

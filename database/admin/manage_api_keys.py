@@ -14,13 +14,7 @@ import psycopg2
 import psycopg2.extras
 
 
-DB_CONFIG = {
-    "host":     "127.0.0.1",
-    "port":     5433,
-    "dbname":   "openwec",
-    "user":     "openwec",
-    "password": "openwec",
-}
+from database.db import DB_CONFIG
 
 
 def list_pending(cur):

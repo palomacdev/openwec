@@ -23,13 +23,7 @@ import psycopg2.extras
 from dataclasses import dataclass, field
 
 
-DB_CONFIG = {
-    "host":     "127.0.0.1",
-    "port":     5433,
-    "dbname":   "openwec",
-    "user":     "openwec",
-    "password": "openwec",
-}
+from database.db import DB_CONFIG
 
 # Lap time thresholds
 MAX_VALID_LAP_S   = 600.0   # discard laps > 10 min (formation, VSC, etc.)

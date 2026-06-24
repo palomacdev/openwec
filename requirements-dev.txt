@@ -1,0 +1,19 @@
+# OpenWEC — Development Dependencies
+# Used by: local development, notebooks, analysis
+#
+# Install:
+#   pip install -r requirements-dev.txt
+
+-r requirements.txt
+-r requirements-api.txt
+
+# Notebooks
+jupyter>=1.0
+ipykernel>=6.0
+
+# SDK with plotting
+matplotlib>=3.7
+
+# Testing (future)
+# pytest>=8.0
+# httpx>=0.27

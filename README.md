@@ -1,320 +1,261 @@
 # OpenWEC
 
-Open endurance racing data platform.
-Collects, normalizes, stores and exposes historical data from WEC, ELMS, ALMS, Le Mans Cup and IMSA.
+**Open endurance racing data platform — WEC, ELMS, ALMS, Le Mans Cup, IMSA.**
+
+Historical lap-by-lap data, stint analytics, and race results from 2012 to the current season, accessible via a REST API, a Python SDK, and a live dashboard.
+
+→ **[openwec.com](https://openwec.com)** — Live dashboard and data explorer  
+→ **[api.openwec.com/docs](https://api.openwec.com/docs)** — Interactive API documentation
 
 ---
 
-## What is this
-
-OpenWEC is a data engineering project built around endurance motorsport.
-The goal is to create the most complete open database of endurance racing results,
-lap times and analytics — and expose it through a public API.
-
-No paywalls. No proprietary formats. Just data.
-
----
-
-## Current status
-
-### Phase 1 — Data Collection ✅
-
-Reverse engineered the Al Kamel Systems timing portal used by FIA WEC, ELMS, ALMS,
-Le Mans Cup and IMSA. Built automated collectors for all five series.
-
-**Discovery:**
-- Navigation is done via two server-side `<select>` elements (`season` and `evvent`)
-- Each `GET /?season=X&evvent=Y` renders file links for that event
-- Files are public, no authentication required
-
-**URL pattern:**
-```
-https://{series}.alkamelsystems.com/Results/{season}/{event}/{championship}/{session}/{file}.CSV
-```
-
-**Files collected per session:**
-| Prefix | Type | Content |
-|---|---|---|
-| `03_Classification_*` | classification | Final result — position, gap, fastest lap per car |
-| `23_Analysis_*` | analysis | Lap-by-lap — every lap of every car |
-| `26_Weather_*` | weather | Track conditions throughout the session |
-
-**Volume:**
-
-| Series | Seasons | Events | Sessions | Files |
-|---|---|---|---|---|
-| WEC | 15 (2011–2026) | 127 | 856 | 2,188 |
-| ELMS | 22 (2005–2026) | 96 | 1,166 | 2,864 |
-| Asian LMS | 5 | 13 | 155 | 357 |
-| Le Mans Cup | 10 | 64 | 503 | 1,241 |
-| IMSA | 11 (2016–2026) | 225 | 3,004 | 3,418 |
-| **Total** | | | | **10,068** |
-
-Note: IMSA does not publish lap-by-lap analysis files.
-
----
-
-### Phase 2 — Database ✅
-
-PostgreSQL 16 + TimescaleDB running in Docker.
-Unified schema covering all five series.
-
-**Tables:**
-```
-series → seasons → events → sessions
-                                ↓
-                    results ← cars ← teams
-                       ↓
-                 result_drivers → drivers
-                       ↓
-                      laps
-```
-
-**Volume loaded:**
-
-| Table | Rows |
-|---|---|
-| series | 5 |
-| seasons | 56 |
-| events | 509 |
-| sessions | 5,684 |
-| teams | 1,249 |
-| cars | 159,986 |
-| drivers | 1,664 |
-| results | 159,986 |
-| result_drivers | 293,398 |
-| laps | 1,613,721 |
-
-**Key design decisions:**
-- `result_drivers` join table supports up to 6 drivers per car (IMSA Daytona)
-- `snapshot_hour` on sessions handles Le Mans hourly classification snapshots
-- `S1_SECONDS`, `S2_SECONDS`, `S3_SECONDS` stored as float directly from CSV
-- WEC/ELMS use `DRIVER_1..5` (full name); IMSA uses `DRIVER1_FIRSTNAME` + `DRIVER1_SECONDNAME` (separate)
-- `imsa_driver_rating` stores Platinum/Gold/Silver/Bronze per driver
-
----
-
-### Phase 3 — API ✅
-
-FastAPI + Uvicorn. Swagger UI at `/docs`.
-
-**Public endpoints (no auth required):**
-```
-GET /api/v1/series
-GET /api/v1/series/{series}/seasons
-GET /api/v1/series/{series}/seasons/{year}/events
-GET /api/v1/series/{series}/seasons/{year}/events/{event_id}/sessions
-GET /api/v1/sessions/{id}
-GET /api/v1/sessions/{id}/results
-```
-
-**Protected endpoints (X-API-Key header required):**
-```
-GET /api/v1/sessions/{id}/laps
-GET /api/v1/sessions/{id}/laps/{car_number}
-```
-
-**Running locally:**
-```bash
-uvicorn api.main:app --reload --port 8000
-```
-
----
-
-## Project structure
+## What's inside
 
 ```
 openwec/
-│
-├── collectors/
+├── collectors/          # Data collection (Al Kamel timing exports)
 │   ├── wec/
-│   │   ├── catalog_spider_v3.py    # discovers all sessions
-│   │   └── download_all.py         # downloads CSVs
 │   ├── elms/
-│   │   └── elms_collect.py
 │   ├── alms/
-│   │   └── alms_collect.py
 │   ├── lemanscup/
-│   │   └── lemanscup_collect.py
 │   └── imsa/
-│       └── imsa_collect.py         # dual-domain collector
-│
 ├── database/
-│   ├── schema.sql                  # PostgreSQL + TimescaleDB schema
-│   ├── migrations/
-│   │   ├── 001_fix_car_number.sql
-│   │   └── 002_laps_nullable_timestamp.sql
-│   └── loader/
-│       ├── load_metadata.py        # pass 1: seasons, events, sessions
-│       ├── load_classification.py  # pass 2: teams, cars, drivers, results
-│       └── load_laps.py            # pass 3: lap-by-lap data
-│
-├── api/
-│   ├── main.py
-│   ├── config.py
-│   ├── deps.py
-│   ├── schemas.py
+│   ├── loader/          # CSV → PostgreSQL loaders
+│   ├── enrichment/      # Driver/team normalization, Wikidata
+│   ├── migrations/      # SQL schema migrations
+│   └── admin/           # API key management CLI
+├── api/                 # FastAPI REST API
 │   └── routers/
-│       ├── series.py
-│       ├── sessions.py
-│       ├── results.py
-│       └── laps.py
-│
-├── docker/
-│   └── docker-compose.yml
-│
-├── requirements.txt
-├── .gitignore
-└── README.md
+├── analytics/           # Stint detection, pace, degradation engine
+├── sdk/                 # Python SDK (openwec package)
+│   └── openwec/
+├── dashboard/           # React dashboard (openwec.com)
+│   └── src/
+│       ├── pages/
+│       └── components/
+└── docker/              # Docker Compose (PostgreSQL + TimescaleDB)
 ```
 
 ---
 
-## Setup
+## Coverage
 
-### Requirements
+| Series | Seasons | Events | Sessions |
+|--------|---------|--------|----------|
+| FIA WEC | 2012–2026 | 103 | 1,100+ |
+| ELMS | 2012–2026 | 110 | 1,100+ |
+| ALMS (Asian) | 2022–2026 | 15 | 400+ |
+| Le Mans Cup | 2017–2026 | 55 | 500+ |
+| IMSA | 2014–2026 | 237 | 2,000+ |
+
+**1.77M+ laps** across all series. Data sourced from [Al Kamel Systems](https://www.alkamelsystems.com/) timing exports.
+
+---
+
+## Quick start
+
+### REST API
+
+Public endpoints — no key required:
+
+```bash
+# List all series
+curl https://api.openwec.com/api/v1/series
+
+# Get Le Mans 2026 results
+curl https://api.openwec.com/api/v1/sessions/6556/results
+```
+
+Protected endpoints (laps, analytics) require an API key — [request one here](https://openwec.com/api-keys).
+
+```bash
+curl https://api.openwec.com/api/v1/sessions/6556/stints \
+  -H "X-API-Key: your-key-here"
+```
+
+### Python SDK
+
+```bash
+pip install openwec  # coming soon to PyPI — install from source for now
+```
+
+```python
+import openwec
+
+openwec.configure(
+    base_url="https://api.openwec.com/api/v1",
+    api_key="your-key-here"
+)
+
+session = openwec.Session("WEC", 2026, "Le Mans", "Race")
+print(session)
+# Session(WEC 2026 LE MANS — Race, id=6556)
+
+results = session.results()
+laps    = session.laps(car="7")
+stints  = session.stints()
+
+session.plot_stint_chart()
+session.plot_gap_to_leader()
+```
+
+---
+
+## Running locally
+
+### Prerequisites
 
 - Python 3.12+
 - Docker Desktop
+- Node.js 20+ (dashboard only)
 
-### Install
+### 1. Database
 
 ```bash
-git clone https://github.com/your-username/openwec
-cd openwec
+# Start PostgreSQL + TimescaleDB
+docker compose -f docker/docker-compose.yml up -d
 
-python -m venv .venv
-.venv\Scripts\activate        # Windows
-source .venv/bin/activate     # Linux/macOS
+# Apply schema
+docker exec -i openwec-db psql -U openwec -d openwec < database/schema.sql
+```
 
+### 2. Data collection
+
+```bash
 pip install -r requirements.txt
 playwright install chromium
-```
 
-### Start the database
-
-```bash
-docker compose -f docker/docker-compose.yml up -d
-```
-
-### Collect data
-
-```bash
-# WEC (all seasons, 2011-2026)
+# WEC (adjust series as needed)
 python collectors/wec/catalog_spider_v3.py
 python collectors/wec/download_all.py
-
-# ELMS
-python collectors/elms/elms_collect.py
-
-# Asian LMS
-python collectors/alms/alms_collect.py
-
-# Le Mans Cup
-python collectors/lemanscup/lemanscup_collect.py
-
-# IMSA (WeatherTech + Endurance only)
-python collectors/imsa/imsa_collect.py
 ```
 
-### Load database
+### 3. Load data
 
 ```bash
+# Order matters: metadata → classification → laps
 python database/loader/load_metadata.py
 python database/loader/load_classification.py
 python database/loader/load_laps.py
+
+# Enrichment
+python database/enrichment/normalize_drivers.py
+python database/enrichment/merge_drivers.py
+python database/enrichment/normalize_teams.py
+
+# Analytics
+python analytics/engine.py --series WEC --session-type Race
 ```
 
-### Start API
+### 4. API
 
 ```bash
+pip install -r requirements-api.txt
+
+# Development (no API key required)
 uvicorn api.main:app --reload --port 8000
+
+# Docs at http://localhost:8000/docs
 ```
 
-Swagger UI: `http://localhost:8000/docs`
+### 5. Dashboard
+
+```bash
+cd dashboard
+npm install
+npm run dev
+# Open http://localhost:5173
+```
 
 ---
 
-## Known issues and future improvements
+## API reference
 
-### Data quality
-- Driver country is null for WEC/ELMS (not present in classification CSV)
-- Compound names parsed incorrectly: "Nyck DE VRIES" → `first: "Nyck DE"`, `last: "VRIES"`
-- IMSA 2016 has different CSV schema (older format, fewer fields)
-- `laps.lap_recorded_at` is currently null (wall clock derivation pending)
+Full interactive documentation: **[api.openwec.com/docs](https://api.openwec.com/docs)**
 
-### Missing data
-- IMSA does not publish lap-by-lap analysis files
-- WEC 2011 has no digital files on Al Kamel portal
-- Some sessions have trailing spaces in filenames (server-side issue, 26 files affected)
+### Public endpoints (no key)
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /series` | List all series |
+| `GET /series/{key}/seasons` | List seasons |
+| `GET /series/{key}/seasons/{year}/events` | List events |
+| `GET /sessions/{id}/results` | Race classification |
+| `GET /drivers/{id}` | Driver profile + career stats |
+| `GET /teams/{id}` | Team profile + history |
+| `GET /events/{id}` | Event with all sessions |
+
+### Protected endpoints (API key required)
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /sessions/{id}/laps/{car}` | Lap-by-lap data |
+| `GET /sessions/{id}/stints` | Stint breakdown |
+| `GET /sessions/{id}/pace` | Green flag pace comparison |
+| `GET /sessions/{id}/gaps` | Gap to leader evolution |
+| `GET /sessions/{id}/pit-window` | Pit window estimator |
+| `GET /sessions/{id}/race-control` | SC / FCY periods |
+| `GET /drivers/{id}/consistency` | Driver consistency stats |
+
+---
+
+## Stack
+
+| Layer | Technology |
+|-------|-----------|
+| Database | PostgreSQL 16 + TimescaleDB |
+| API | FastAPI (Python 3.12) |
+| SDK | Python — pandas-native |
+| Dashboard | React + Recharts |
+| Hosting | Docker, self-hosted |
+| Data source | Al Kamel Systems timing exports |
+
+---
+
+## Data refresh
+
+When new races happen, run:
+
+```bash
+# 1. Collect new data
+python collectors/wec/catalog_spider_v3.py
+python collectors/wec/download_all.py
+
+# 2. Load
+python database/loader/load_metadata.py
+python database/loader/load_classification.py --series WEC
+python database/loader/load_laps.py --series WEC
+
+# 3. Clean phantom sessions
+# DELETE FROM sessions WHERE session_type = 'Other'
+# AND NOT EXISTS (SELECT 1 FROM laps WHERE session_id = sessions.id)
+# AND NOT EXISTS (SELECT 1 FROM results WHERE session_id = sessions.id);
+
+# 4. Enrich
+python database/enrichment/normalize_drivers.py
+python database/enrichment/merge_drivers.py
+python database/enrichment/normalize_teams.py
+
+# 5. Analytics
+python analytics/engine.py --series WEC --session-type Race
+
+# 6. Deploy (see DEPLOYMENT.md)
+```
 
 ---
 
 ## Roadmap
 
-```
-Phase 1 — Data Collection          ✅ complete
-  · Al Kamel reverse engineering
-  · 5 series collected
-  · 10,068 CSVs on disk
+See [ROADMAP.md](ROADMAP.md) for the full roadmap.
 
-Phase 2 — Database                 ✅ complete
-  · PostgreSQL + TimescaleDB
-  · 1,613,721 laps loaded
-  · 159,986 race results
-
-Phase 3 — Public API               ✅ complete
-  · FastAPI REST API
-  · Public + protected endpoints
-  · Swagger UI
-
-Phase 4 — Analytics Engine         ← next
-  · Stint degradation model
-  · Driver consistency (lap time variance)
-  · Pit window estimator
-  · Class comparison across sessions
-
-Phase 5 — Live Ingestion           ← planned
-  · WebSocket connection to Al Kamel during races
-  · Kafka pipeline: raw → normalized → events
-  · Real-time leaderboard endpoint
-
-Phase 6 — Dashboard                ← planned
-  · Grafana (MVP)
-  · Next.js (v2)
-  · Lap delta visualization
-  · Tire degradation charts
-  · Stint analysis
-
-Phase 7 — Enrichment               ← planned
-  · Driver profiles from RacingSportsCars
-  · Driver country and nationality mapping
-  · Chassis and team history
-  · Career statistics per driver
-```
+**Coming next:**
+- PyPI package (`pip install openwec`)
+- Live timing ingestion
+- Track map visualization (if position data available in live stream)
 
 ---
 
-## Data sources
+## License
 
-| Source | URL | Usage |
-|---|---|---|
-| Al Kamel Systems (WEC) | fiawec.alkamelsystems.com | Classification, analysis, weather |
-| Al Kamel Systems (ELMS) | elms.alkamelsystems.com | Classification, analysis, weather |
-| Al Kamel Systems (ALMS) | alms.alkamelsystems.com | Classification, analysis, weather |
-| Al Kamel Systems (LMC) | lemanscup.alkamelsystems.com | Classification, analysis, weather |
-| Al Kamel Systems (IMSA) | imsa.alkamelsystems.com | Classification, weather |
-| Al Kamel Cloud (IMSA) | imsa.results.alkamelcloud.com | Classification, weather (2024+) |
-
----
-
-## Tech stack
-
-| Layer | Technology |
-|---|---|
-| Data collection | Python, aiohttp, BeautifulSoup, Playwright |
-| Database | PostgreSQL 16, TimescaleDB |
-| Infrastructure | Docker, Docker Compose |
-| API | FastAPI, Uvicorn, Pydantic |
-| Analytics (planned) | Pandas, NumPy, scikit-learn |
-| Dashboard (planned) | Grafana → Next.js |
+MIT — data sourced from Al Kamel Systems public timing exports.  
+Not affiliated with ACO, FIA, or any racing organization.

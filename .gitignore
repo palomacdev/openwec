@@ -1,9 +1,9 @@
-#  Dados baixados (não vão pro repo) 
+# Downloaded data (not included in the repo)
 raw/
 normalized/
 diag/
 
-#  Catálogos gerados (regeneráveis pelos spiders) 
+# Generated catalogs (regenerable by spiders)
 catalog/wec/wec_catalog.json
 catalog/wec/sessions.json
 catalog/wec/seasons_events.json
@@ -60,6 +60,18 @@ node_modules/
 
 # vm
 CREDENTIALS.local.md
+MAINTENANCE.md
 
 # db vm *.dump
 *.dump
+
+# Dashboard production env (contains API key)
+dashboard/src/.env.production
+
+# Enrichment generated files
+database/enrichment/wikidata_cache.json
+database/enrichment/wikidata_not_found.json
+database/enrichment/needs_review.json
+
+# Dashboard build
+dashboard/dist/

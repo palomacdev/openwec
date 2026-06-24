@@ -1,28 +1,24 @@
-# OpenWEC - Python Dependencies
+# OpenWEC — Base Dependencies
+# Used by: data collectors, database loaders, enrichment scripts
+#
+# Install:
+#   pip install -r requirements.txt
+#
+# After installing Playwright:
+#   playwright install chromium
 
-# Install: 
-# pip install -r requirements.txt
+# HTTP / scraping
+aiohttp>=3.9
+playwright>=1.40
+beautifulsoup4>=4.12
+requests>=2.31
 
-# Playwright requires an extra step to install the browsers:
-# playwright install chromium
-
-# Data Collection
-aiohttp
-playwright
-beautifulsoup4
-
-# Browser Automation (diagnostic purposes)
-playwright
-
-# Data processing 
-pandas
-numpy
+# Data processing
+pandas>=2.0
+numpy>=1.26
 
 # Database
-psycopg2-binary
-sqlalchemy
+psycopg2-binary>=2.9
 
-# API 
-fastapi
-uvicorn
-pydantic
+# Settings
+pydantic-settings>=2.0

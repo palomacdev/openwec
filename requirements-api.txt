@@ -1,0 +1,14 @@
+# OpenWEC — API Dependencies
+# Used by: api/ (FastAPI server)
+#
+# Install:
+#   pip install -r requirements-api.txt
+#
+# Production Docker image uses this file (see Dockerfile)
+
+fastapi>=0.111
+uvicorn[standard]>=0.29
+pydantic>=2.7
+pydantic-settings>=2.0
+psycopg2-binary>=2.9
+email-validator>=2.1

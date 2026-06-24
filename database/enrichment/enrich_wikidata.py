@@ -19,13 +19,7 @@ import requests
 from pathlib import Path
 
 
-DB_CONFIG = {
-    "host":     "127.0.0.1",
-    "port":     5433,
-    "dbname":   "openwec",
-    "user":     "openwec",
-    "password": "openwec",
-}
+from database.db import DB_CONFIG
 
 WIKIDATA_API  = "https://www.wikidata.org/w/api.php"
 CACHE_FILE    = Path("database/enrichment/wikidata_cache.json")

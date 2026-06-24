@@ -21,16 +21,11 @@ import io
 import re
 import psycopg2
 from pathlib import Path
+from database.db import DB_CONFIG
 
 
 # ── Config ───────────────────────────────────────────────────
-DB_CONFIG = {
-    "host":     "127.0.0.1",
-    "port":     5433,
-    "dbname":   "openwec",
-    "user":     "openwec",
-    "password": "openwec",
-}
+
 
 RAW_DIRS = {
     "WEC":       Path("raw/wec"),
