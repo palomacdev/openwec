@@ -39,7 +39,7 @@ class Settings(BaseSettings):
         return {k.strip() for k in self.api_keys.split(",") if k.strip()}
 
     class Config:
-        env_file = ".env"
+        env_file = "openwec\.env"
         env_file_encoding = "utf-8"
 
 

@@ -76,7 +76,7 @@ curl https://api.openwec.com/api/v1/sessions/6556/stints \
 ### Python SDK
 
 ```bash
-pip install openwec  # coming soon to PyPI — install from source for now
+pip install openwec  
 ```
 
 ```python

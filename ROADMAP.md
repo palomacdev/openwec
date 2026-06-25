@@ -76,14 +76,14 @@
 
 ---
 
-## Phase 8 — Python Library (stable, PyPI) ← next
+## Phase 8 — Python Library (stable, PyPI) ✅
 - Stable public API (semver)
 - `pip install openwec`
 - Published to PyPI
 - Full docstrings + Sphinx docs
 - Example Jupyter notebooks
 
-## Phase 9 — Live Timing
+## Phase 9 — Live Timing ← next
 - Connect to Al Kamel WebSocket during live sessions
 - Parse real-time payload format
 - Investigate whether live payload includes track position (X/Y/GPS)
