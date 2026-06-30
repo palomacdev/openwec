@@ -83,7 +83,6 @@ pip install openwec
 import openwec
 
 openwec.configure(
-    base_url="https://api.openwec.com/api/v1",
     api_key="your-key-here"
 )
 

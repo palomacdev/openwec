@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "openwec"
-version = "0.1.0"
+version = "0.1.1"
 description = "Python SDK for endurance racing data — WEC, ELMS, ALMS, Le Mans Cup, IMSA"
 readme = "README.md"
 license = "MIT"

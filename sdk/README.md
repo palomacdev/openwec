@@ -29,7 +29,6 @@ import openwec
 # Configure — public endpoints work without a key
 # Request a free key at https://openwec.com/api-keys
 openwec.configure(
-    base_url="https://api.openwec.com/api/v1",
     api_key="your-key-here"  # required for laps and analytics
 )
 

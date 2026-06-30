@@ -6,7 +6,7 @@ import requests
 
 
 class _Config:
-    base_url: str = "http://localhost:8000/api/v1"
+    base_url: str = "https://api.openwec.com/api/v1"
     api_key:  str | None = None
 
 
@@ -18,7 +18,7 @@ def configure(base_url: str | None = None, api_key: str | None = None):
     Configure the SDK.
 
     Args:
-        base_url: API base URL (default: http://localhost:8000/api/v1)
+        base_url: API base URL (default: https://api.openwec.com/api/v1)
         api_key:  API key for protected endpoints (laps, analytics)
     """
     if base_url:
