@@ -5,7 +5,6 @@ Public endpoints for navigation: series, seasons, events, sessions.
 
 from fastapi import APIRouter, Depends, HTTPException
 import psycopg2.extras
-
 from api.deps import get_cursor
 from api.schemas import SeriesOut, SeasonOut, EventOut, SessionOut
 
