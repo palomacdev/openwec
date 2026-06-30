@@ -83,8 +83,13 @@
 - Full docstrings + Sphinx docs
 - Example Jupyter notebooks
 
-## Phase 9 — Live Timing ← next
+## Phase 9 — Live Timing  ← next
 - Connect to Al Kamel WebSocket during live sessions
+  - **Confirmed:** `livetiming.alkamelsystems.com` uses SockJS (WebSocket-capable)
+  - **Confirmed:** dedicated `/fiawec/positioning` page exists — strong signal of live X/Y data
+  - **Next:** capture actual WS message frames during a live session
+    (São Paulo WEC, 2026-07-12 / IMSA Canada, 2026-07-11–12)
+    via Chrome DevTools → Network → WS → Messages tab
 - Parse real-time payload format
 - Investigate whether live payload includes track position (X/Y/GPS)
 - If available: build track map visualization (à la FastF1)
