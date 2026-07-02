@@ -83,7 +83,7 @@
 - Full docstrings + Sphinx docs
 - Example Jupyter notebooks
 
-## Phase 9 — Live Timing  ← next
+## Phase 9 — Live Timing  ← next (waiting new race)
 - Connect to Al Kamel WebSocket during live sessions
   - **Confirmed:** `livetiming.alkamelsystems.com` uses SockJS (WebSocket-capable)
   - **Confirmed:** dedicated `/fiawec/positioning` page exists — strong signal of live X/Y data
