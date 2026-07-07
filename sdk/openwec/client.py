@@ -2,7 +2,7 @@
 OpenWEC SDK — Client configuration and HTTP wrapper.
 """
 
-import requests
+import httpx
 
 
 class _Config:
@@ -37,7 +37,7 @@ def _headers() -> dict:
 def _get(path: str, params: dict | None = None) -> dict | list:
     """Performs a GET request to the OpenWEC API. Raises on error."""
     url = f"{_config.base_url}{path}"
-    resp = requests.get(url, params=params, headers=_headers(), timeout=30)
+    resp = httpx.get(url, params=params, headers=_headers(), timeout=30)
 
     if resp.status_code == 404:
         raise OpenWECNotFoundError(f"Not found: {path} ({resp.text})")

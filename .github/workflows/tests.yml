@@ -1,0 +1,65 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: timescale/timescaledb:latest-pg16
+        env:
+          POSTGRES_USER: openwec
+          POSTGRES_PASSWORD: openwec
+          POSTGRES_DB: openwec
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements-api.txt
+          pip install pytest httpx respx
+          pip install -e sdk/
+
+      - name: Apply database schema
+        run: |
+          PGPASSWORD=openwec psql -h localhost -p 5433 -U openwec -d openwec -f database/schema.sql
+
+      - name: Run SDK tests (no DB needed)
+        run: pytest tests/sdk/ -v
+
+      - name: Start API server
+        run: |
+          uvicorn api.main:app --port 8000 &
+          sleep 3
+        env:
+          DB_HOST: 127.0.0.1
+          DB_PORT: 5433
+          DB_NAME: openwec
+          DB_USER: openwec
+          DB_PASSWORD: openwec
+          API_KEYS: ""
+
+      - name: Run API tests (dev mode, no API key)
+        run: pytest tests/api/ -v -k "not stints_with_key and not pace_with_key and not race_control_with_key"
+        env:
+          BASE_URL: http://localhost:8000
