@@ -13,12 +13,21 @@ Or against production:
     BASE_URL=https://api.openwec.com pytest tests/api/ -v
 """
 
+
 import os
 import pytest
 import httpx
 
 BASE_URL = os.environ.get("BASE_URL", "http://localhost:8000")
 API_KEY  = os.environ.get("API_KEY", "")
+
+# IDs — match fixtures.sql for CI, real data for production
+SERIES_KEY    = "WEC"
+SEASON_YEAR   = 2026
+EVENT_ID      = int(os.environ.get("TEST_EVENT_ID",   "1"))
+SESSION_ID    = int(os.environ.get("TEST_SESSION_ID", "1"))
+DRIVER_ID     = int(os.environ.get("TEST_DRIVER_ID",  "1"))
+TEAM_ID       = int(os.environ.get("TEST_TEAM_ID",    "1"))
 
 
 @pytest.fixture
