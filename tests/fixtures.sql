@@ -49,7 +49,8 @@ INSERT INTO results (id, session_id, car_id, position, status, laps_completed, t
 ON CONFLICT DO NOTHING;
 
 -- Result drivers
-INSERT INTO result_drivers (result_id, driver_id, driver_slot) VALUES
+INSERT INTO result_drivers (result_id, driver_id, slot) VALUES
+
   (1, 1, 1),
   (1, 2, 2)
 ON CONFLICT DO NOTHING;

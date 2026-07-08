@@ -44,6 +44,10 @@ jobs:
         run: |
           PGPASSWORD=openwec psql -h localhost -p 5433 -U openwec -d openwec -f database/schema.sql
 
+      - name: Apply test fixtures
+        run: |
+          PGPASSWORD=openwec psql -h localhost -p 5433 -U openwec -d openwec -f tests/fixtures.sql
+
       - name: Run SDK tests (no DB needed)
         run: pytest tests/sdk/ -v
 
@@ -59,7 +63,11 @@ jobs:
           DB_PASSWORD: openwec
           API_KEYS: ""
 
-      - name: Run API tests (dev mode, no API key)
+      - name: Run API tests
         run: pytest tests/api/ -v -k "not stints_with_key and not pace_with_key and not race_control_with_key"
         env:
           BASE_URL: http://localhost:8000
+          TEST_EVENT_ID: 1
+          TEST_SESSION_ID: 1
+          TEST_DRIVER_ID: 1
+          TEST_TEAM_ID: 1
