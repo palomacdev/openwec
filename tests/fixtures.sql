@@ -69,3 +69,35 @@ CREATE TABLE IF NOT EXISTS api_key_requests (
 );
 CREATE INDEX IF NOT EXISTS idx_api_key_requests_key ON api_key_requests(api_key);
 CREATE INDEX IF NOT EXISTS idx_api_key_requests_status ON api_key_requests(status);
+
+-- Analytics tables (created by engine.py at runtime, needed for API tests)
+CREATE TABLE IF NOT EXISTS analytics_stints (
+    id              SERIAL PRIMARY KEY,
+    session_id      INT NOT NULL,
+    car_id          INT NOT NULL,
+    stint_number    SMALLINT NOT NULL,
+    start_lap       SMALLINT,
+    end_lap         SMALLINT,
+    lap_count       SMALLINT,
+    tyre_age_laps   SMALLINT,
+    baseline_pace_s DECIMAL(8,3),
+    degradation_s_per_lap DECIMAL(8,4),
+    consistency_s   DECIMAL(8,3),
+    is_final_stint  BOOLEAN DEFAULT FALSE,
+    computed_at     TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (session_id, car_id, stint_number)
+);
+
+CREATE TABLE IF NOT EXISTS analytics_car_session (
+    id              SERIAL PRIMARY KEY,
+    session_id      INT NOT NULL,
+    car_id          INT NOT NULL,
+    total_laps      SMALLINT,
+    green_flag_laps SMALLINT,
+    pit_stops       SMALLINT,
+    best_lap_s      DECIMAL(8,3),
+    avg_pace_s      DECIMAL(8,3),
+    consistency_s   DECIMAL(8,3),
+    computed_at     TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (session_id, car_id)
+);
