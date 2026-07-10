@@ -36,4 +36,4 @@ OpenWEC collects data from Al Kamel Systems public timing exports. We do not scr
 
 ## Questions
 
-Open an issue — happy to discuss before you spend time building something.
+Open an issue. I'm happy to discuss before you spend time building something.
