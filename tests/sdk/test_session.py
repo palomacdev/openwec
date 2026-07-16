@@ -248,7 +248,7 @@ def test_laps_auth_error():
 # ── Exceptions ────────────────────────────────────────────────
 
 def test_version():
-    assert openwec.__version__ == "0.1.1"
+    assert openwec.__version__ == "0.2.0"
 
 
 @respx.mock
