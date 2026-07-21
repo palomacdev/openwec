@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: API Documentation
+    url: https://api.openwec.com/docs
+    about: Browse all available endpoints interactively
+  - name: Request an API key
+    url: https://openwec.com/api-keys
+    about: Get free access to laps and analytics endpoints
