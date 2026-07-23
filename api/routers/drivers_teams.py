@@ -3,9 +3,10 @@ OpenWEC API — Drivers & Teams Router
 Public endpoints: driver profiles, career history, team profiles.
 
 Endpoints:
-    GET /drivers/{id}           ← driver profile + career stats
-    GET /drivers/{id}/results   ← full race history
-    GET /teams/{id}             ← team profile + season history
+    GET /drivers/search       ← search drivers by name
+    GET /drivers/{id}         ← driver profile + career stats
+    GET /drivers/{id}/results ← full race history
+    GET /teams/{id}           ← team profile + season history
 """
 
 from typing import Optional
@@ -18,6 +19,14 @@ router = APIRouter(tags=["Drivers & Teams"])
 
 
 # ── Schemas ───────────────────────────────────────────────────
+
+class DriverSearchResult(BaseModel):
+    id:         int
+    first_name: str
+    last_name:  str
+    country:    Optional[str]
+    imsa_driver_rating: Optional[str]
+
 
 class DriverProfile(BaseModel):
     id:                  int
@@ -72,6 +81,39 @@ class TeamSeasonEntry(BaseModel):
 
 
 # ── Endpoints ─────────────────────────────────────────────────
+
+@router.get("/drivers/search", response_model=list[DriverSearchResult])
+def search_drivers(
+    name:  str = Query(..., min_length=2, description="Partial name search (first or last name)"),
+    limit: int = Query(20, ge=1, le=100),
+    cur=Depends(get_cursor),
+):
+    """
+    Search drivers by name (case-insensitive, partial match).
+    Searches both first_name and last_name.
+    Public — no API key required.
+
+    Example:
+        GET /drivers/search?name=albuquerque
+        GET /drivers/search?name=van der
+    """
+    cur.execute("""
+        SELECT id, first_name, last_name, country,
+               imsa_driver_rating::text AS imsa_driver_rating
+        FROM drivers
+        WHERE first_name ILIKE %s
+           OR last_name  ILIKE %s
+           OR (first_name || ' ' || last_name) ILIKE %s
+        ORDER BY last_name, first_name
+        LIMIT %s
+    """, (f"%{name}%", f"%{name}%", f"%{name}%", limit))
+
+    rows = cur.fetchall()
+    if not rows:
+        raise HTTPException(404, f"No drivers found matching '{name}'.")
+
+    return [DriverSearchResult(**dict(r)) for r in rows]
+
 
 @router.get("/drivers/{driver_id}", response_model=DriverProfile)
 def get_driver(driver_id: int, cur=Depends(get_cursor)):
