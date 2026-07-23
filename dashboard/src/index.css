@@ -46,6 +46,22 @@ a {
   text-decoration: none;
 }
 
+/* ── Session selector ───────────────────────────────────── */
+
+.session-selector {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 16px 0 8px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+}
+
+.session-selector .select {
+  flex: 1;
+  min-width: 120px;
+}
+
 /* ── Layout ─────────────────────────────────────────────── */
 
 .dashboard {
