@@ -246,7 +246,60 @@ class Session:
         self._laps_cache[cache_key] = df
         return df
 
-    # ── Analytics ─────────────────────────────────────────────
+    def driver_laps(self, driver_name: str, car: str | None = None) -> pd.DataFrame:
+        """
+        Return lap-by-lap data for a specific driver within the session.
+
+        Filters laps by driver name using a case-insensitive partial match.
+        In endurance racing, multiple drivers share a car — this method lets
+        you isolate one driver's stints from the shared-drive data.
+
+        Args:
+            driver_name: Driver name or partial name to filter by, e.g.
+                ``"Conway"``, ``"Mike Conway"``, ``"CONWAY"``.
+                Matching is case-insensitive and substring-based.
+            car: Optional car number to filter. If ``None``, searches across
+                all cars in the session (slower for long races).
+
+        Returns:
+            DataFrame with the same columns as :meth:`laps`, filtered to
+            laps where ``driver_name`` appears in the ``driver_name`` column.
+
+        Raises:
+            OpenWECAuthError: If no API key is configured.
+            ValueError: If no laps are found matching the driver name.
+
+        Note:
+            This method is unique to endurance racing — it has no equivalent
+            in FastF1 because Formula 1 cars have a single driver per race.
+
+        Example:
+            >>> session = openwec.Session("WEC", 2026, "Le Mans", "Race")
+            >>> conway_laps = session.driver_laps("Conway", car="7")
+            >>> print(f"Conway drove {len(conway_laps)} laps")
+            >>>
+            >>> # Compare two drivers in the same car
+            >>> kobayashi_laps = session.driver_laps("Kobayashi", car="7")
+            >>> print(f"Pace: Conway {conway_laps['lap_time_s'].median():.3f}s "
+            ...       f"vs Kobayashi {kobayashi_laps['lap_time_s'].median():.3f}s")
+        """
+        all_laps = self.laps(car=car)
+
+        if all_laps.empty or "driver_name" not in all_laps.columns:
+            raise ValueError("No lap data available for this session.")
+
+        mask = all_laps["driver_name"].str.contains(
+            driver_name, case=False, na=False
+        )
+        result = all_laps[mask].copy()
+
+        if result.empty:
+            raise ValueError(
+                f"No laps found for driver matching '{driver_name}'. "
+                f"Available drivers: {', '.join(all_laps['driver_name'].dropna().unique()[:10])}"
+            )
+
+        return result
 
     def stints(self, car: str | None = None,
                car_class: str | None = None) -> pd.DataFrame:
