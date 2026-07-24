@@ -245,6 +245,52 @@ def test_laps_auth_error():
         session.laps(car="7")
 
 
+@respx.mock
+def test_driver_laps_filters_by_name():
+    """driver_laps() should return only laps for the specified driver."""
+    multi_driver_laps = [
+        {**MOCK_LAPS[0], "driver_name": "Mike Conway", "lap_number": 1},
+        {**MOCK_LAPS[0], "driver_name": "Mike Conway", "lap_number": 2},
+        {**MOCK_LAPS[0], "driver_name": "Kamui Kobayashi", "lap_number": 3},
+        {**MOCK_LAPS[0], "driver_name": "Kamui Kobayashi", "lap_number": 4},
+    ]
+
+    respx.get(f"{BASE}/series/WEC/seasons/2026/events").mock(
+        return_value=httpx.Response(200, json=MOCK_EVENTS)
+    )
+    respx.get(f"{BASE}/series/WEC/seasons/2026/events/621/sessions").mock(
+        return_value=httpx.Response(200, json=MOCK_SESSIONS)
+    )
+    respx.get(f"{BASE}/sessions/6556/laps/7").mock(
+        return_value=httpx.Response(200, json=multi_driver_laps)
+    )
+
+    session = openwec.Session("WEC", 2026, "Le Mans", "Race")
+    conway_laps = session.driver_laps("Conway", car="7")
+
+    assert len(conway_laps) == 2
+    assert all("Conway" in name for name in conway_laps["driver_name"])
+
+
+@respx.mock
+def test_driver_laps_not_found():
+    """driver_laps() should raise ValueError if driver not in session."""
+    respx.get(f"{BASE}/series/WEC/seasons/2026/events").mock(
+        return_value=httpx.Response(200, json=MOCK_EVENTS)
+    )
+    respx.get(f"{BASE}/series/WEC/seasons/2026/events/621/sessions").mock(
+        return_value=httpx.Response(200, json=MOCK_SESSIONS)
+    )
+    respx.get(f"{BASE}/sessions/6556/laps/7").mock(
+        return_value=httpx.Response(200, json=MOCK_LAPS)
+    )
+
+    session = openwec.Session("WEC", 2026, "Le Mans", "Race")
+
+    with pytest.raises(ValueError, match="No laps found for driver"):
+        session.driver_laps("Albuquerque", car="7")
+
+
 # ── Exceptions ────────────────────────────────────────────────
 
 def test_version():
