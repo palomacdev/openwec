@@ -13,6 +13,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.routers import series, sessions, results, laps, analytics, drivers_teams, api_keys
+from api.logging import setup_logging, RequestLoggingMiddleware
+
+setup_logging()
+
 
 
 
@@ -24,6 +28,7 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
+app.add_middleware(RequestLoggingMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
