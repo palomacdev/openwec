@@ -48,7 +48,7 @@ openwec/
 | Le Mans Cup | 2017–2026 | 55 | 500+ |
 | IMSA | 2014–2026 | 237 | 2,000+ |
 
-**1.77M+ laps** across all series. Data sourced from [Al Kamel Systems](https://www.alkamelsystems.com/) timing exports.
+**1.96M+ laps** across all series. Data sourced from [Al Kamel Systems](https://www.alkamelsystems.com/) timing exports.
 
 ---
 
@@ -64,6 +64,9 @@ curl https://api.openwec.com/api/v1/series
 
 # Get Le Mans 2026 results
 curl https://api.openwec.com/api/v1/sessions/6556/results
+
+# Search for a driver
+curl "https://api.openwec.com/api/v1/drivers/search?name=albuquerque"
 ```
 
 Protected endpoints (laps, analytics) require an API key — [request one here](https://openwec.com/api-keys).
@@ -76,27 +79,41 @@ curl https://api.openwec.com/api/v1/sessions/6556/stints \
 ### Python SDK
 
 ```bash
-pip install openwec  
+pip install openwec
+pip install openwec[plotting]  # with matplotlib support
 ```
 
 ```python
 import openwec
 
-openwec.configure(
-    api_key="your-key-here"
-)
+openwec.configure(api_key="your-key-here")
 
 session = openwec.Session("WEC", 2026, "Le Mans", "Race")
 print(session)
 # Session(WEC 2026 LE MANS — Race, id=6556)
 
+# Results (no key needed)
 results = session.results()
-laps    = session.laps(car="7")
-stints  = session.stints()
 
-session.plot_stint_chart()
-session.plot_gap_to_leader()
+# Lap-by-lap data
+laps = session.laps(car="7")
+
+# Unique to endurance racing — filter laps by driver within a shared-drive car
+conway_laps    = session.driver_laps("Conway", car="7")
+kobayashi_laps = session.driver_laps("Kobayashi", car="7")
+
+# Analytics
+stints     = session.stints(car_class="HYPERCAR")
+pace       = session.pace(car_class="HYPERCAR")
+pit_window = session.pit_window(car="7")
+
+# Plots
+session.plot_stint_chart(car_class="HYPERCAR")
+session.plot_gap_to_leader(car_class="HYPERCAR")
+session.plot_lap_evolution(car="7")
 ```
+
+See [sdk/examples/](sdk/examples/) for full analysis notebooks.
 
 ---
 
@@ -179,7 +196,8 @@ Full interactive documentation: **[api.openwec.com/docs](https://api.openwec.com
 | `GET /series` | List all series |
 | `GET /series/{key}/seasons` | List seasons |
 | `GET /series/{key}/seasons/{year}/events` | List events |
-| `GET /sessions/{id}/results` | Race classification |
+| `GET /sessions/{id}/results` | Race classification (paginated) |
+| `GET /drivers/search?name=` | Search drivers by name |
 | `GET /drivers/{id}` | Driver profile + career stats |
 | `GET /teams/{id}` | Team profile + history |
 | `GET /events/{id}` | Event with all sessions |
@@ -204,9 +222,9 @@ Full interactive documentation: **[api.openwec.com/docs](https://api.openwec.com
 |-------|-----------|
 | Database | PostgreSQL 16 + TimescaleDB |
 | API | FastAPI (Python 3.12) |
-| SDK | Python — pandas-native |
+| SDK | Python — pandas-native, httpx |
 | Dashboard | React + Recharts |
-| Hosting | Docker, self-hosted |
+| Hosting | Docker, DigitalOcean |
 | Data source | Al Kamel Systems timing exports |
 
 ---
@@ -238,8 +256,17 @@ python database/enrichment/normalize_teams.py
 # 5. Analytics
 python analytics/engine.py --series WEC --session-type Race
 
-# 6. Deploy (see DEPLOYMENT.md)
+# 6. Deploy (see MAINTENANCE.md)
 ```
+
+---
+
+## Community
+
+- [Contributing](CONTRIBUTING.md)
+- [Code of Conduct](CODE_OF_CONDUCT.md)
+- [Data Policy](DATA_POLICY.md)
+- [Changelog](CHANGELOG.md)
 
 ---
 
@@ -247,10 +274,10 @@ python analytics/engine.py --series WEC --session-type Race
 
 See [ROADMAP.md](ROADMAP.md) for the full roadmap.
 
-**Coming next:**
-- PyPI package (`pip install openwec`)
-- Live timing ingestion
+**Next:**
+- Live timing ingestion (investigating Al Kamel WebSocket — Austin WEC, Sep 2026)
 - Track map visualization (if position data available in live stream)
+- Super GT / GT World Challenge coverage investigation
 
 ---
 

@@ -26,13 +26,11 @@ pip install openwec[plotting]
 ```python
 import openwec
 
-# Configure — public endpoints work without a key
+# Public endpoints work without a key.
 # Request a free key at https://openwec.com/api-keys
-openwec.configure(
-    api_key="your-key-here"  # required for laps and analytics
-)
+openwec.configure(api_key="your-key-here")  # required for laps and analytics
 
-# Load any session
+# Load any session — WEC, ELMS, ALMS, Le Mans Cup, or IMSA
 session = openwec.Session("WEC", 2026, "Le Mans", "Race")
 print(session)
 # Session(WEC 2026 LE MANS — Race, id=6556)
@@ -45,11 +43,16 @@ print(results[["position", "car_number", "car_class", "team", "drivers"]].head(1
 laps = session.laps(car="7")
 print(laps[["lap_number", "lap_time_s", "s1_s", "s2_s", "s3_s"]].head())
 
-# Stints and pace (key required)
-stints = session.stints(car_class="HYPERCAR")
-pace   = session.pace(car_class="HYPERCAR")
+# Endurance-specific: filter laps by driver within a shared-drive car
+# (unique to endurance racing — not possible in FastF1)
+conway_laps     = session.driver_laps("Conway", car="7")
+kobayashi_laps  = session.driver_laps("Kobayashi", car="7")
+print(f"Conway pace:    {conway_laps['lap_time_s'].median():.3f}s")
+print(f"Kobayashi pace: {kobayashi_laps['lap_time_s'].median():.3f}s")
 
-# Pit window estimate
+# Stints and pace
+stints     = session.stints(car_class="HYPERCAR")
+pace       = session.pace(car_class="HYPERCAR")
 pit_window = session.pit_window(car="7")
 
 # Plots (requires matplotlib)
@@ -70,13 +73,13 @@ session.plot_gap_to_leader(car_class="HYPERCAR")
 | Le Mans Cup | 2017–2026 |
 | IMSA | 2014–2026 |
 
-**1.77M+ laps** across all series.
+**1.96M+ laps** across all series.
 
 ---
 
 ## API key
 
-Public endpoints (results, driver profiles, team profiles) require no key.  
+Public endpoints (results, driver profiles, team profiles, driver search) require no key.  
 Lap-by-lap data and analytics endpoints require a free API key.
 
 → **[Request a key at openwec.com/api-keys](https://openwec.com/api-keys)**
@@ -85,17 +88,29 @@ Lap-by-lap data and analytics endpoints require a free API key.
 
 ## Session methods
 
-| Method | Returns | Key required |
-|--------|---------|-------------|
-| `.results()` | DataFrame | No |
-| `.laps(car=None)` | DataFrame | Yes |
-| `.stints(car_class=None)` | DataFrame | Yes |
-| `.pace(car_class=None)` | DataFrame | Yes |
-| `.gaps(car_class=None)` | DataFrame | Yes |
-| `.pit_window(car=None)` | DataFrame | Yes |
-| `.plot_lap_evolution(car)` | Figure | Yes |
-| `.plot_stint_chart()` | Figure | Yes |
-| `.plot_gap_to_leader()` | Figure | Yes |
+| Method | Description | Key required |
+|--------|-------------|-------------|
+| `.results()` | Race classification as DataFrame | No |
+| `.laps(car=None)` | Lap-by-lap data | Yes |
+| `.driver_laps(name, car=None)` | Laps filtered by driver name ⚑ | Yes |
+| `.stints(car_class=None)` | Stint breakdown per car | Yes |
+| `.pace(car_class=None)` | Average green-flag pace | Yes |
+| `.gaps(car_class=None)` | Gap to leader evolution | Yes |
+| `.pit_window(car=None)` | Optimal pit window estimate | Yes |
+| `.plot_lap_evolution(car)` | Lap time chart | Yes |
+| `.plot_stint_chart()` | Strategy/stint chart | Yes |
+| `.plot_gap_to_leader()` | Gap to leader chart | Yes |
+
+⚑ **Unique to endurance racing** — multiple drivers share a car. `driver_laps()` has no equivalent in FastF1.
+
+---
+
+## Example notebooks
+
+| Notebook | Description |
+|----------|-------------|
+| [le_mans_2026.ipynb](examples/le_mans_2026.ipynb) | Full race analysis — results, pace, stints, plots |
+| [driver_career.ipynb](examples/driver_career.ipynb) | Cross-series career analysis for a driver |
 
 ---
 
