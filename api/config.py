@@ -12,10 +12,14 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     # Database
     db_host:     str = "127.0.0.1"  # override via DB_HOST env var
-    db_port:     int = 5433         # override via DB_HOST env var
-    db_name:     str = "openwec"    # override via DB_HOST env var
-    db_user:     str = "openwec"    # override via DB_HOST env var
-    db_password: str = "openwec"    # override via DB_HOST env var - CHANGE THIS IN PRODUCTION
+    db_port:     int = 5433         # override via DB_PORT env var
+    db_name:     str = "openwec"    # override via DB_NAME env var
+    db_user:     str = "openwec"    # override via DB_USER env var
+    db_password: str = "openwec"    # override via DB_PASSWORD env var - CHANGE THIS IN PRODUCTION
+    
+    # Redis (rate limiting)
+    redis_host:  str = "127.0.0.1"  # override via REDIS_HOST env var
+    redis_port:  int = 6379         # override via REDIS_PORT env var
 
     # API Keys — comma-separated list of valid keys
     # Example: API_KEYS="key1,key2,key3"
@@ -39,7 +43,7 @@ class Settings(BaseSettings):
         return {k.strip() for k in self.api_keys.split(",") if k.strip()}
 
     class Config:
-        env_file = "openwec\.env"
+        env_file = "openwec/.env"
         env_file_encoding = "utf-8"
 
 
