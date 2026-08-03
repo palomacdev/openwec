@@ -34,7 +34,7 @@ Usage:
 from .client import configure, OpenWECError, OpenWECNotFoundError, OpenWECAuthError
 from .session import Session
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"
 
 __all__ = [
     "Session",
