@@ -1,3 +1,5 @@
+import { Link } from 'react-router-dom'
+
 function formatTime(totalSeconds) {
   if (totalSeconds == null) return '—'
   const h = Math.floor(totalSeconds / 3600)
@@ -16,6 +18,30 @@ function formatLapTime(seconds) {
   const m = Math.floor(seconds / 60)
   const s = (seconds % 60).toFixed(3)
   return `${m}:${s.padStart(6, '0')}`
+}
+
+function DriverLinks({ drivers }) {
+  if (!drivers || !Array.isArray(drivers) || drivers.length === 0) return '—'
+  return (
+    <span>
+      {drivers.map((d, i) => (
+        <span key={d.slot}>
+          {i > 0 && ' / '}
+          {d.id ? (
+            <Link
+              to={`/drivers/${d.id}`}
+              style={{ color: 'var(--text-dim)', textDecoration: 'none' }}
+              onClick={e => e.stopPropagation()}
+            >
+              {d.first_name} {d.last_name}
+            </Link>
+          ) : (
+            `${d.first_name} ${d.last_name}`
+          )}
+        </span>
+      ))}
+    </span>
+  )
 }
 
 export default function Leaderboard({ results, onSelectCar, selectedCar }) {
@@ -55,14 +81,9 @@ export default function Leaderboard({ results, onSelectCar, selectedCar }) {
             <td>
               <div className="team-cell">
                 <span className="team-name">{r.team || '—'}</span>
-                
-                {r.drivers && (
-                  <span className="drivers">
-                   {r.drivers
-                     .map(d => `${d.first_name} ${d.last_name}`)
-                     .join(' / ')}
-                  </span>
-                )}
+                <span className="drivers">
+                  <DriverLinks drivers={r.drivers} />
+                </span>
               </div>
             </td>
             <td className="text-dim">{r.vehicle || '—'}</td>
