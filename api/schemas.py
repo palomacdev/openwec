@@ -43,6 +43,7 @@ class SessionOut(BaseModel):
 # ── Results ───────────────────────────────────────────────────
 
 class DriverSlot(BaseModel):
+    id:          Optional[int]
     slot:        int
     first_name:  str
     last_name:   str

@@ -109,6 +109,7 @@ def get_results(
             SELECT
                 rd.result_id,
                 rd.slot,
+                d.id,
                 d.first_name,
                 d.last_name,
                 d.country,
@@ -124,6 +125,7 @@ def get_results(
             if rid not in drivers_by_result:
                 drivers_by_result[rid] = []
             drivers_by_result[rid].append(DriverSlot(
+                id=dr["id"],
                 slot=dr["slot"],
                 first_name=dr["first_name"] or "",
                 last_name=dr["last_name"] or "",
