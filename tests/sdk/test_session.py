@@ -294,7 +294,7 @@ def test_driver_laps_not_found():
 # ── Exceptions ────────────────────────────────────────────────
 
 def test_version():
-    assert openwec.__version__ == "0.2.1"
+    assert openwec.__version__ == "0.2.2"
 
 
 @respx.mock

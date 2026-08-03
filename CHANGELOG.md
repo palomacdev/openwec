@@ -9,6 +9,23 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ---
+## [0.2.2] — 2026-07-28
+
+### API
+- `GET /drivers/search?name=` — search drivers by partial name (public)
+- `GET /sessions/{id}/results` — optional pagination and car_class filter
+- `DriverSlot` now includes driver `id` for profile page linking
+
+### Dashboard
+- Dynamic event selector (series → season → event → session dropdowns)
+- Driver profile page `/drivers/:id` with career stats and race history
+- Driver names in leaderboard are clickable links
+
+### Infrastructure
+- Structured JSON logging (method, path, status, duration_ms, api_key_hash)
+- Redis-backed rate limiting with in-memory fallback for development
+
+--- 
 
 ## [0.2.0] — 2026-07-01
 
