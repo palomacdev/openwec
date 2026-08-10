@@ -9,6 +9,19 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ---
+
+## [0.2.3] — 2026-07-28
+
+### API
+- `GET /series/{key}/seasons/{year}/stats` — season aggregate stats
+  (total races, laps, entries, classes, manufacturers, top drivers/teams)
+
+### SDK
+- `examples/season_comparison.ipynb` — WEC season comparison notebook
+  (2024 vs 2025 vs 2026: manufacturer presence, pace, lap counts)
+
+---
+
 ## [0.2.2] — 2026-07-28
 
 ### API
