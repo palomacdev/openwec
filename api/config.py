@@ -6,28 +6,34 @@ Production: set via environment or .env file.
 Development: defaults work out of the box with docker-compose.
 """
 
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    # Database
-    db_host:     str = "127.0.0.1"  # override via DB_HOST env var
-    db_port:     int = 5433         # override via DB_PORT env var
-    db_name:     str = "openwec"    # override via DB_NAME env var
-    db_user:     str = "openwec"    # override via DB_USER env var
-    db_password: str = "openwec"    # override via DB_PASSWORD env var - CHANGE THIS IN PRODUCTION
-    
-    # Redis (rate limiting)
-    redis_host:  str = "127.0.0.1"  # override via REDIS_HOST env var
-    redis_port:  int = 6379         # override via REDIS_PORT env var
 
-    # API Keys — comma-separated list of valid keys
-    # Example: API_KEYS="key1,key2,key3"
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    # Database
+    db_host: str = "127.0.0.1"
+    db_port: int = 5433
+    db_name: str = "openwec"
+    db_user: str = "openwec"
+    db_password: str = "openwec"
+
+    # Redis
+    redis_host: str = "127.0.0.1"
+    redis_port: int = 6379
+
+    # API Keys
     api_keys: str = ""
 
     # Pagination
     default_page_size: int = 50
-    max_page_size:     int = 500
+    max_page_size: int = 500
 
     @property
     def db_url(self) -> str:
@@ -40,11 +46,12 @@ class Settings(BaseSettings):
     def valid_api_keys(self) -> set[str]:
         if not self.api_keys:
             return set()
-        return {k.strip() for k in self.api_keys.split(",") if k.strip()}
 
-    class Config:
-        env_file = "openwec/.env"
-        env_file_encoding = "utf-8"
+        return {
+            key.strip()
+            for key in self.api_keys.split(",")
+            if key.strip()
+        }
 
 
 settings = Settings()
