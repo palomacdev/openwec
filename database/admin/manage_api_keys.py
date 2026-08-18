@@ -36,13 +36,17 @@ def list_pending(cur):
         print()
 
 
-def approve(cur, conn, request_id: int, rpm: int):
+def approve(cur, conn, request_id: int, rpm: int,
+            daily: int | None = None, monthly: int | None = None):
     cur.execute("""
         UPDATE api_key_requests
-        SET status = 'approved', approved_at = NOW(), requests_per_minute = %s
+        SET status = 'approved', approved_at = NOW(),
+            requests_per_minute = %s,
+            daily_limit = %s,
+            monthly_limit = %s
         WHERE id = %s AND status = 'pending'
         RETURNING api_key, name, email
-    """, (rpm, request_id))
+    """, (rpm, daily, monthly, request_id))
     row = cur.fetchone()
     if not row:
         print(f"No pending request with id {request_id}.")
@@ -50,6 +54,10 @@ def approve(cur, conn, request_id: int, rpm: int):
     conn.commit()
     print(f"Approved [{request_id}] {row['name']} <{row['email']}>")
     print(f"Rate limit: {rpm} req/min")
+    if daily:
+        print(f"Daily quota: {daily} req/day")
+    if monthly:
+        print(f"Monthly quota: {monthly} req/month")
     print(f"Key now active: {row['api_key']}")
 
 
@@ -86,8 +94,12 @@ def run():
     parser.add_argument("--list-all",     action="store_true")
     parser.add_argument("--approve",      type=int, metavar="ID")
     parser.add_argument("--reject",       type=int, metavar="ID")
-    parser.add_argument("--rate-limit",   type=int, default=60,
+    parser.add_argument("--rate-limit",    type=int, default=60,
                          help="Requests per minute for approval (default 60)")
+    parser.add_argument("--daily-limit",   type=int, default=None,
+                         help="Max requests per day (default: unlimited)")
+    parser.add_argument("--monthly-limit", type=int, default=None,
+                         help="Max requests per month (default: unlimited)")
     args = parser.parse_args()
 
     conn = psycopg2.connect(**DB_CONFIG)
@@ -98,7 +110,8 @@ def run():
     elif args.list_all:
         list_all(cur)
     elif args.approve:
-        approve(cur, conn, args.approve, args.rate_limit)
+        approve(cur, conn, args.approve, args.rate_limit,
+                args.daily_limit, args.monthly_limit)
     elif args.reject:
         reject(cur, conn, args.reject)
     else:
