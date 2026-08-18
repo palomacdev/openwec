@@ -10,6 +10,22 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.2.4] — 2026-08-18
+
+### API
+- `POST /admin/keys/{key}/revoke` — instant key revocation (clears DB, cache, and Redis counter)
+- `GET /admin/keys` — list all keys (admin only)
+- `GET /admin/keys/pending` — list pending requests (admin only)
+- Daily and monthly quota support per API key (NULL = unlimited)
+
+### Infrastructure
+- Rate limit alerts: structured WARNING log after 10 hits by same key
+- `--daily-limit` and `--monthly-limit` flags on `manage_api_keys.py --approve`
+- `database/admin/log_analytics.py` — parse docker logs and generate usage report
+- `database/migrations/005_api_key_quotas.sql` — daily_limit, monthly_limit columns
+
+---
+
 ## [0.2.3] — 2026-07-28
 
 ### API
