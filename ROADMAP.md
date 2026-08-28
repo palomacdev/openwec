@@ -76,14 +76,14 @@
 
 ---
 
-## Phase 8 — Python Library (stable, PyPI) ✅
+## Phase 8 — Python Library (stable, PyPI) ← next
 - Stable public API (semver)
 - `pip install openwec`
 - Published to PyPI
 - Full docstrings + Sphinx docs
 - Example Jupyter notebooks
 
-## Phase 9 — Live Timing  ← next (waiting new race)
+## Phase 9 — Live Timing
 - Connect to Al Kamel WebSocket during live sessions
   - **Confirmed:** `livetiming.alkamelsystems.com` uses SockJS (WebSocket-capable)
   - **Confirmed:** dedicated `/fiawec/positioning` page exists — strong signal of live X/Y data
@@ -101,3 +101,10 @@
 - Multi-race comparison endpoints
 - Season championship standings
 - Driver/team career analytics
+
+### Series coverage investigation (concluded)
+- **GT World Challenge Europe** — server-side rendered HTML, no public API, no lap-by-lap data, not Al Kamel. Not worth implementing without lap-by-lap.
+- **Super GT** — uses TSL (Timing Solutions Ltd.), not Al Kamel Systems. Incompatible with existing pipeline.
+- **GTWC America** — already partially covered via IMSA rounds.
+
+_Possible future: if SRO migrates to Al Kamel or publishes a public API._
