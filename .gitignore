@@ -75,3 +75,6 @@ database/enrichment/needs_review.json
 
 # Dashboard build
 dashboard/dist/
+
+# Notification credentials
+.env.notifications
