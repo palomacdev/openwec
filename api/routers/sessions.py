@@ -47,9 +47,7 @@ def get_event(event_id: int, cur=Depends(get_cursor)):
         SELECT 
             s.id, s.name, s.session_type::text AS session_type,
             s.session_at::text AS session_at,
-            s.imsa_series, s.snapshot_hour,
-            COUNT(DISTINCT r.id) AS result_count,
-            COUNT(DISTINCT l.id) AS lap_count
+            s.imsa_series, s.snapshot_hour
         FROM sessions s
         LEFT JOIN results r ON r.session_id = s.id
         LEFT JOIN laps l    ON l.session_id = s.id
