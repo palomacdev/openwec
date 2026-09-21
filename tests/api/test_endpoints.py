@@ -197,7 +197,7 @@ def test_race_control_with_key(client, auth_headers):
 def test_api_key_request(client):
     r = client.post("/api/v1/api-keys/request", json={
         "name": "Test User",
-        "email": "test@example.com",
+        "email": "ci-test@openwec.internal",
         "intended_use": "automated test"
     })
     assert r.status_code == 200
