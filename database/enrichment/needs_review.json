@@ -45,6 +45,15 @@
     "action": "merge"
   },
   {
+    "wec_id": 426757,
+    "wec_name": "Mateo Cressoni",
+    "imsa_id": 9702,
+    "imsa_name": "Matteo Cressoni",
+    "country": "ITA",
+    "rating": "Silver",
+    "action": "merge"
+  },
+  {
     "wec_id": 415669,
     "wec_name": "Robert Foley",
     "imsa_id": 18565,
@@ -69,6 +78,24 @@
     "imsa_name": "Dan Harper",
     "country": "GBR",
     "rating": null,
+    "action": "merge"
+  },
+  {
+    "wec_id": 425358,
+    "wec_name": "Gerald Kraut",
+    "imsa_id": 44488,
+    "imsa_name": "Gerry Kraut",
+    "country": "USA",
+    "rating": "Bronze",
+    "action": "merge"
+  },
+  {
+    "wec_id": 419822,
+    "wec_name": "Nicolas Minassian",
+    "imsa_id": 30285,
+    "imsa_name": "Nic Minassian",
+    "country": "FRA",
+    "rating": "Platinum",
     "action": "merge"
   },
   {
