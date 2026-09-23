@@ -1,0 +1,69 @@
+# OpenWEC — Production Runtime
+#
+# Faithful representation of the compose file that currently runs on the
+# production VM at /opt/openwec/docker-compose.yml.
+#
+# Captured in phase 9A.1 from the running production host.
+# Source fingerprint (sha256 of the VM file, which contains a literal password):
+#   857005362ffd426fe2452a0442d41c6b6953f51f9f0af123cda3861897101ae2
+#
+# The ONLY intentional difference from the VM file is that the database
+# password is read from the environment instead of being written inline.
+# The VM file hardcodes the value; it must never be committed to this
+# repository, which is public.
+#
+# Usage (must run with this file in a directory named "openwec", see below):
+#   docker compose -f docker-compose.prod.yml up -d
+#
+# IMPORTANT — VOLUME NAMING
+#   The production data volume is named "openwec_pgdata". Compose derives that
+#   from the project name, which defaults to the directory name (/opt/openwec).
+#   Running this file from a directory with any other name creates a NEW, EMPTY
+#   volume and the database will appear blank. Either keep the directory named
+#   "openwec" or pass -p openwec. This file deliberately does not set a project
+#   name, because the production file does not set one either.
+#
+# IMAGE TAGS
+#   "latest-pg16" and "7-alpine" are mutable tags. They are kept as-is here
+#   because the exact digests currently running in production are no longer
+#   obtainable (see RUNTIME.md, "Images and reproducibility"). Do not change
+#   these tags without an explicit decision: production runs PostgreSQL 16.14
+#   with TimescaleDB 2.27.2 and Redis 7.4.10.
+
+services:
+  db:
+    image: timescale/timescaledb:latest-pg16
+    container_name: openwec-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: openwec
+      # Production hardcodes this value. Here it comes from the environment or
+      # from the .env file sitting next to this compose file. Verified in 9A.1:
+      # the value is identical to DB_PASSWORD in the production .env.
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set}
+      POSTGRES_DB: openwec
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5433:5432"
+
+  api:
+    build: .
+    container_name: openwec-api
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      - db
+    ports:
+      - "127.0.0.1:8000:8000"
+
+  redis:
+    image: redis:7-alpine
+    container_name: openwec-redis
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6379:6379"
+    command: redis-server --maxmemory 64mb --maxmemory-policy allkeys-lru
+
+volumes:
+  pgdata:

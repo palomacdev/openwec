@@ -13,7 +13,7 @@ const CLASS_COLOR = {
 }
 
 function formatGap(gap) {
-  if (gap == null) return 'LEADER'
+  if (gap == null) return '-'
   return `+${gap.toFixed(3)}s`
 }
 
@@ -30,7 +30,17 @@ export default function Home() {
 
   useEffect(() => {
     getResults(SESSION_ID)
-      .then((data) => { setResults(data.slice(0, 10)); setLoaded(true) })
+      .then((data) => {
+      // Deduplica por car_number, mantém só a primeira ocorrência (posição final)
+      const seen = new Set()
+      const unique = data.filter(r => {
+        if (seen.has(r.car_number)) return false
+        seen.add(r.car_number)
+        return true
+      })
+      setResults(unique.slice(0, 10))
+      setLoaded(true)
+    })
       .catch(() => setLoaded(true))
   }, [])
 
@@ -96,8 +106,8 @@ export default function Home() {
         {[
           { value: '5',       label: 'Series' },
           { value: '510+',    label: 'Events' },
-          { value: '5,150',   label: 'Sessions' },
-          { value: '1.77M+',  label: 'Laps' },
+          { value: '5,425',   label: 'Sessions' },
+          { value: '2M+',  label: 'Laps' },
           { value: '2012',    label: 'Since' },
         ].map((s) => (
           <div key={s.label} className="stat-item">
