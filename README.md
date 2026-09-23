@@ -48,7 +48,7 @@ openwec/
 | Le Mans Cup | 2017–2026 | 55 | 500+ |
 | IMSA | 2014–2026 | 237 | 2,000+ |
 
-**1.96M+ laps** across all series. Data sourced from [Al Kamel Systems](https://www.alkamelsystems.com/) timing exports.
+**2M+ laps** across all series. Data sourced from [Al Kamel Systems](https://www.alkamelsystems.com/) timing exports.
 
 ---
 

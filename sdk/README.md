@@ -73,7 +73,7 @@ session.plot_gap_to_leader(car_class="HYPERCAR")
 | Le Mans Cup | 2017–2026 |
 | IMSA | 2014–2026 |
 
-**1.96M+ laps** across all series.
+**2M+ laps** across all series.
 
 ---
 
