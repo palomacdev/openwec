@@ -22,6 +22,30 @@ See [README.md](README.md) for full setup instructions.
 - React components follow the existing design system (CSS variables, `var(--accent)`, etc.)
 - Commit messages: `feat:`, `fix:`, `chore:`, `docs:` prefixes
 
+## What must not be committed
+
+This repository is public. Keep it a description of **how to run the project**,
+not an inventory of how any particular instance is deployed.
+
+Never commit:
+
+1. Credentials of any kind — passwords, tokens, API keys, certificates. This
+   includes test values, if the same value is used anywhere real.
+2. IP addresses, hostnames or server names of a live deployment.
+3. Absolute paths of a live host (`/opt/...`, `/etc/...`, `/var/log/...`), or the
+   location of its configuration and secret files.
+4. Bucket names, backup paths, object naming patterns or retention policies.
+5. Exact patch versions of what is running, kernel versions, container runtime
+   versions, or the security posture of running containers. State requirements
+   as ranges (`PostgreSQL 16+`), never as an inventory.
+6. Operational runbooks, job schedules, maintenance windows, or restore
+   procedures specific to a deployment.
+7. References to unrelated services or projects that share infrastructure.
+8. Incident reports that describe live configuration. Recording that something
+   was fixed is fine; describing the configuration is not.
+
+Operational documentation belongs in a private repository, not here.
+
 ## Submitting changes
 
 1. Fork the repository

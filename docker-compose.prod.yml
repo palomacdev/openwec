@@ -1,31 +1,28 @@
-# OpenWEC — Production Runtime
+# OpenWEC — Deployment
 #
-# Faithful representation of the compose file that currently runs on the
-# production VM at /opt/openwec/docker-compose.yml.
+# Reference compose file for running OpenWEC as a deployed service: the API
+# built from the Dockerfile in this repository, TimescaleDB for storage, and
+# Redis for rate limiting.
 #
-# Captured from the running production host.
+# The database password comes from DB_PASSWORD in .env. No literal credential
+# belongs in this file, which is public. See .env.example.
 #
-# The production file and this one both read the database password from
-# DB_PASSWORD in .env. Neither holds a literal value, and no real credential
-# is committed to this repository, which is public.
-#
-# Usage (must run with this file in a directory named "openwec", see below):
+# Usage (read VOLUME NAMING below before the first run):
 #   docker compose -f docker-compose.prod.yml up -d
 #
 # IMPORTANT — VOLUME NAMING
-#   The production data volume is named "openwec_pgdata". Compose derives that
-#   from the project name, which defaults to the directory name (/opt/openwec).
-#   Running this file from a directory with any other name creates a NEW, EMPTY
-#   volume and the database will appear blank. Either keep the directory named
-#   "openwec" or pass -p openwec. This file deliberately does not set a project
-#   name, because the production file does not set one either.
+#   Compose prefixes volume names with the project name, which defaults to the
+#   directory name. Running this file from a directory with a different name
+#   than the one used before creates a NEW, EMPTY volume, and the database will
+#   appear blank. Keep the directory name stable, or pass -p <project>
+#   explicitly. This file deliberately does not set a project name.
 #
 # IMAGE TAGS
-#   "latest-pg16" and "7-alpine" are mutable tags. They are kept as-is here
-#   because the exact digests currently running in production are no longer
-#   obtainable (see RUNTIME.md, "Images and reproducibility"). Do not change
-#   these tags without an explicit decision: production runs PostgreSQL 16.14
-#   with TimescaleDB 2.27.2 and Redis 7.4.10.
+#   "latest-pg16" and "7-alpine" are mutable: the image behind either tag
+#   changes over time, so two deployments of this file can end up on different
+#   builds. Pinning by digest only stays portable across architectures if the
+#   digest is a manifest index rather than a platform-specific manifest.
+#   Requirements: PostgreSQL 16 with TimescaleDB 2.x, and Redis 7.
 
 services:
   db:
@@ -35,7 +32,7 @@ services:
     environment:
       POSTGRES_USER: openwec
       # Comes from the environment, or from the .env file sitting next to this
-      # compose file. Production resolves it the same way.
+      # compose file. Must be the same value the api service reads from .env.
       POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set}
       POSTGRES_DB: openwec
     volumes:

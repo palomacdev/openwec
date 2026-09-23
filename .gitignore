@@ -78,3 +78,7 @@ dashboard/dist/
 
 # Notification credentials
 .env.notifications
+
+# Operational documentation — kept local, not published
+RUNTIME.md
+.local-ops/
