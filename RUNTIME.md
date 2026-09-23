@@ -79,8 +79,8 @@ Compose project lives at `/opt/openwec`. The project name is therefore
 ### Compose
 
 `docker-compose.prod.yml` in this repository reproduces the production compose
-file. The only intentional difference: the database password is read from the
-environment instead of being written inline.
+file. Both obtain the database password from `DB_PASSWORD` in `.env`; neither
+holds a literal value (see section 5).
 
 **The volume name depends on the project name.** Running the compose file from a
 directory not named `openwec` creates a new, empty `pgdata` volume and the
@@ -155,12 +155,17 @@ Other secrets that exist on the host and are **not** in this repository:
 | `~/.s3cfg` | s3cmd credentials for the backup bucket |
 | `/etc/letsencrypt/…` | TLS certificates and private keys |
 
-### Known issue — plaintext password in the production compose file
+### Resolved — plaintext password in the production compose file
 
-`/opt/openwec/docker-compose.yml` contains the database password as a literal
-string. It is the same value as `DB_PASSWORD` in `.env` and the same value the
-two running containers hold. The versioned compose file here does not reproduce
-that literal.
+Kept as a record. This is no longer the case.
+
+The audit that produced this document found the database password written as a
+literal string in `/opt/openwec/docker-compose.yml`. The credential was then
+rotated, and the production compose file was changed to read `DB_PASSWORD` from
+`.env`, the same mechanism the versioned file uses. No literal password remains
+in either file, and no real credential was ever committed to this repository.
+
+The production `.env` is owned by `root:root` with mode `0600`.
 
 ---
 
@@ -317,7 +322,7 @@ web/API runtime.
 | Item | Production | This repository |
 |---|---|---|
 | `Dockerfile` | `/opt/openwec/Dockerfile` | reproduced byte-for-byte |
-| Production compose | literal DB password inline | password from environment |
+| Production compose | `DB_PASSWORD` from `.env` | same mechanism |
 | Compose location | `/opt/openwec/docker-compose.yml` | `docker-compose.prod.yml` at repo root |
 | Dev compose | not present | `docker/docker-compose.yml`, `db` service only |
 | `requirements-api.txt` | identical file (sha256 `5939f6c3…`) | identical |

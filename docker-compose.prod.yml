@@ -3,14 +3,11 @@
 # Faithful representation of the compose file that currently runs on the
 # production VM at /opt/openwec/docker-compose.yml.
 #
-# Captured in phase 9A.1 from the running production host.
-# Source fingerprint (sha256 of the VM file, which contains a literal password):
-#   857005362ffd426fe2452a0442d41c6b6953f51f9f0af123cda3861897101ae2
+# Captured from the running production host.
 #
-# The ONLY intentional difference from the VM file is that the database
-# password is read from the environment instead of being written inline.
-# The VM file hardcodes the value; it must never be committed to this
-# repository, which is public.
+# The production file and this one both read the database password from
+# DB_PASSWORD in .env. Neither holds a literal value, and no real credential
+# is committed to this repository, which is public.
 #
 # Usage (must run with this file in a directory named "openwec", see below):
 #   docker compose -f docker-compose.prod.yml up -d
@@ -37,9 +34,8 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: openwec
-      # Production hardcodes this value. Here it comes from the environment or
-      # from the .env file sitting next to this compose file. Verified in 9A.1:
-      # the value is identical to DB_PASSWORD in the production .env.
+      # Comes from the environment, or from the .env file sitting next to this
+      # compose file. Production resolves it the same way.
       POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set}
       POSTGRES_DB: openwec
     volumes:
