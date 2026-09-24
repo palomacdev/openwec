@@ -18,7 +18,14 @@ See [README.md](README.md) for full setup instructions.
 
 - Python 3.12+, type hints where practical
 - FastAPI endpoints follow existing patterns in `api/routers/`
-- Database changes go in `database/migrations/` as numbered SQL files
+- Database changes go in **two** places, and both are required:
+  1. update `database/schema.sql` so it describes the new consolidated state —
+     this is what creates a new database;
+  2. add a numbered file to `database/migrations/` so existing installs can be
+     upgraded, when an upgrade path is needed.
+
+  Migrations are **not** part of creating a new database and are never applied
+  after `schema.sql`. Keep migration files UTF-8 without BOM.
 - React components follow the existing design system (CSS variables, `var(--accent)`, etc.)
 - Commit messages: `feat:`, `fix:`, `chore:`, `docs:` prefixes
 

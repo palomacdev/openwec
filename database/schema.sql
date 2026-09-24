@@ -230,15 +230,17 @@ CREATE TABLE laps (
 
     created_at                  TIMESTAMPTZ DEFAULT NOW(),
 
-    PRIMARY KEY (id, lap_recorded_at),
-    UNIQUE (session_id, car_id, lap_number)
+    PRIMARY KEY (id),
+    CONSTRAINT laps_session_car_lap_unique
+        UNIQUE (session_id, car_id, lap_number)
 );
 
--- TimescaleDB hypertable (run after CREATE TABLE)
--- SELECT create_hypertable('laps', 'lap_recorded_at',
---     chunk_time_interval => INTERVAL '1 month',
---     if_not_exists => TRUE
--- );
+-- laps is a regular PostgreSQL table, not a TimescaleDB hypertable.
+-- lap_recorded_at is nullable — the loader inserts NULL whenever the
+-- timestamp cannot be derived — and a hypertable requires its partitioning
+-- column to be NOT NULL and present in every unique index. Converting laps
+-- would therefore change both the column contract and the dedupe key.
+-- Not a pending task: a deliberate current state.
 
 
 -- ────────────────────────────────────────────────────────────

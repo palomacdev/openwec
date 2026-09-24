@@ -48,6 +48,15 @@ jobs:
         run: |
           PGPASSWORD=openwec psql -h localhost -p 5433 -U openwec -d openwec -f tests/fixtures.sql
 
+      - name: Run schema bootstrap tests
+        run: pytest tests/schema/ -v
+        env:
+          DB_HOST: 127.0.0.1
+          DB_PORT: 5433
+          DB_NAME: openwec
+          DB_USER: openwec
+          DB_PASSWORD: openwec
+
       - name: Run SDK tests (no DB needed)
         run: pytest tests/sdk/ -v
 

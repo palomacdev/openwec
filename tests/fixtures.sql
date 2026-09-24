@@ -55,7 +55,9 @@ INSERT INTO result_drivers (result_id, driver_id, slot) VALUES
   (1, 2, 2)
 ON CONFLICT DO NOTHING;
 
--- API key requests table (may not exist if migration not run)
+-- API key requests table (may not exist if migration not run).
+-- Mirrors migrations 003 + 005: the quota columns are required by
+-- api/deps.py:_lookup_dynamic_key, which selects them on every dynamic key.
 CREATE TABLE IF NOT EXISTS api_key_requests (
     id                   SERIAL PRIMARY KEY,
     name                 VARCHAR(120) NOT NULL,
@@ -65,8 +67,15 @@ CREATE TABLE IF NOT EXISTS api_key_requests (
     status               VARCHAR(20) NOT NULL DEFAULT 'pending',
     requests_per_minute  INT NOT NULL DEFAULT 60,
     created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    approved_at          TIMESTAMPTZ
+    approved_at          TIMESTAMPTZ,
+    daily_limit          INT DEFAULT NULL,
+    monthly_limit        INT DEFAULT NULL
 );
+
+-- If the table already existed without the quota columns, add them.
+ALTER TABLE api_key_requests
+    ADD COLUMN IF NOT EXISTS daily_limit   INT DEFAULT NULL,
+    ADD COLUMN IF NOT EXISTS monthly_limit INT DEFAULT NULL;
 CREATE INDEX IF NOT EXISTS idx_api_key_requests_key ON api_key_requests(api_key);
 CREATE INDEX IF NOT EXISTS idx_api_key_requests_status ON api_key_requests(status);
 
@@ -101,3 +110,28 @@ CREATE TABLE IF NOT EXISTS analytics_car_session (
     computed_at     TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE (session_id, car_id)
 );
+
+-- ── Sequence sync ──────────────────────────────────────────
+-- The inserts above supply explicit ids, which does not advance the SERIAL
+-- sequences. Without this, the next insert that omits id starts at 1 and
+-- collides with the fixture rows.
+--
+-- pg_get_serial_sequence resolves the real sequence name, so nothing is
+-- hardcoded. setval(..., MAX(id) + 1, false) makes the next nextval return
+-- MAX(id) + 1, and works on an empty table too (COALESCE to 0 -> next is 1).
+-- Re-running this file is safe: the result depends only on current data.
+DO $$
+DECLARE
+    t text;
+BEGIN
+    FOREACH t IN ARRAY ARRAY[
+        'series', 'seasons', 'events', 'sessions',
+        'teams', 'drivers', 'cars', 'results'
+    ]
+    LOOP
+        EXECUTE format(
+            'SELECT setval(pg_get_serial_sequence(%L, ''id''), COALESCE((SELECT MAX(id) FROM %I), 0) + 1, false)',
+            t, t
+        );
+    END LOOP;
+END $$;

@@ -22,7 +22,7 @@ openwec/
 ├── database/
 │   ├── loader/          # CSV → PostgreSQL loaders
 │   ├── enrichment/      # Driver/team normalization, Wikidata
-│   ├── migrations/      # SQL schema migrations
+│   ├── migrations/      # Upgrades for existing installs (not for new databases)
 │   └── admin/           # API key management CLI
 ├── api/                 # FastAPI REST API
 │   └── routers/
@@ -134,6 +134,14 @@ docker compose -f docker/docker-compose.yml up -d
 # Apply schema
 docker exec -i openwec-db psql -U openwec -d openwec < database/schema.sql
 ```
+
+**`database/schema.sql` is the consolidated current schema and the only source
+for creating a new database.** It is kept up to date with every schema change.
+
+`database/migrations/` holds historical upgrades for databases that already
+exist. **Do not apply them after `schema.sql` on a fresh database** — they
+describe transitions from older states and some of them cannot apply to the
+consolidated schema. A new database needs `schema.sql` and nothing else.
 
 ### 2. Data collection
 
