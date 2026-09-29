@@ -23,10 +23,10 @@ api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 def require_admin_key(api_key: str = Security(api_key_header)):
     """Only static admin keys (API_KEYS env var) can access admin endpoints."""
     valid_static_keys = settings.valid_api_keys
-    
-    print("DEBUG received:", api_key)
-    print("DEBUG valid keys:", valid_static_keys)
-    
+
+    # Never log the received key or the configured key set -- not in full,
+    # not masked, not hashed, not a prefix. Any representation derived from
+    # a credential still narrows the search space for whoever reads the log.
     if not valid_static_keys or not api_key or api_key not in valid_static_keys:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
