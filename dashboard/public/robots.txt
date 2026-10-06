@@ -1,0 +1,7 @@
+# robots.txt for https://openwec.com
+# Crawl policy only. This file is not an access-control mechanism.
+
+User-agent: *
+Allow: /
+
+Sitemap: https://openwec.com/sitemap.xml
