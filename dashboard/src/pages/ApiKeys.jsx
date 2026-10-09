@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import SiteNav from '../components/SiteNav'
 import SiteFooter from '../components/SiteFooter'
+import Notice from '../components/Notice.jsx'
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api/v1'
 
@@ -71,6 +72,12 @@ export default function ApiKeys() {
           issued immediately, active after review.
         </p>
       </section>
+
+      <Notice title="API key requests temporarily paused">
+        We&apos;re currently reviewing our API key management process. Approvals are
+        temporarily paused, and pending requests will be reviewed once the process is
+        restored. Thank you for your patience.
+      </Notice>
 
       <div className="apikey-layout">
 
