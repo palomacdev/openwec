@@ -1,0 +1,40 @@
+name: Frontend
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dashboard
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Verify discovery files in dist
+        run: |
+          test -f dist/robots.txt
+          test -f dist/sitemap.xml
+          cmp public/robots.txt dist/robots.txt
+          cmp public/sitemap.xml dist/sitemap.xml
+          python3 -c "import xml.etree.ElementTree as ET; ET.parse('dist/sitemap.xml')"
