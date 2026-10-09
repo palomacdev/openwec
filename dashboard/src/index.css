@@ -1254,3 +1254,81 @@ a {
     display: none;
   }
 }
+
+/* ── Notice ─────────────────────────────────────────────── */
+
+.notice {
+  background: rgba(255, 176, 0, 0.07);
+  border: 1px solid var(--accent-dim);
+  border-radius: 6px;
+}
+
+/* Full-bleed strip above the routes: no side border, aligns with page gutters */
+.notice-banner {
+  border-radius: 0;
+  border-left: none;
+  border-right: none;
+  border-top: none;
+  margin-bottom: 24px;
+}
+
+.notice-banner .notice-inner {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 12px 24px;
+}
+
+.notice-inline {
+  margin-bottom: 24px;
+}
+
+.notice-inline .notice-inner {
+  padding: 16px 20px;
+}
+
+.notice-inner {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.notice-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  margin-top: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.notice-body {
+  min-width: 0;
+}
+
+.notice-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 4px;
+}
+
+.notice-text {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-dim);
+}
+
+@media (max-width: 700px) {
+  .notice-banner .notice-inner {
+    padding: 10px 16px;
+  }
+  .notice-inline .notice-inner {
+    padding: 14px 16px;
+  }
+  .notice-text {
+    font-size: 12px;
+  }
+}
