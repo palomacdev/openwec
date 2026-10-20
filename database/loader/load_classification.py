@@ -6,8 +6,20 @@ Reads classification CSVs and populates:
 Strategy:
   - Walks raw/ directories for each series
   - For sessions with hourly snapshots, loads only the final hour
-  - Upserts teams, cars, drivers (idempotent)
-  - Inserts results and result_drivers
+  - Upserts teams and drivers (idempotent)
+  - Inserts cars, results and result_drivers
+
+KNOWN DEFECT - cars are NOT upserted idempotently.
+  upsert_car issues ON CONFLICT DO NOTHING with no conflict target against a
+  table that has no unique constraint, so the insert always succeeds and always
+  mints a new car_id. results then gets a fresh row per run, because its
+  UNIQUE (session_id, car_id) is keyed on the id that just changed. Re-running
+  this loader multiplies the classification: a session loaded three times
+  serves every position three times.
+
+  Until the competitive-entry model (migration 006) is wired up, writes are
+  blocked. Set OPENWEC_ALLOW_DUPLICATING_LOADER=1 to override and accept the
+  duplication. --dry-run is always allowed.
 
 Usage:
     python database/loader/load_classification.py
@@ -18,6 +30,7 @@ Usage:
 import argparse
 import csv
 import io
+import os
 import re
 import psycopg2
 from pathlib import Path
@@ -561,7 +574,35 @@ def process_session(cur, series_key: str, sess: dict, dry_run: bool) -> dict:
     return {"status": "ok", "rows": len(rows), "loaded": loaded, "session_id": session_id}
 
 
+OVERRIDE_ENV = "OPENWEC_ALLOW_DUPLICATING_LOADER"
+
+
+def _writes_are_blocked() -> bool:
+    """
+    Guard for the window between knowing about the duplication and fixing it.
+
+    Blocking is the conservative choice. Repairing idempotency means picking an
+    identity rule, and every candidate either merges entries the source proves
+    are different or splits entries it only spells differently. That decision
+    does not belong in an additive change.
+    """
+    return os.environ.get(OVERRIDE_ENV, "").strip() not in {"1", "true", "TRUE", "yes"}
+
+
 def run(series_filter: str | None = None, dry_run: bool = False):
+    if not dry_run and _writes_are_blocked():
+        print("=" * 60)
+        print("BLOCKED - this loader duplicates classification data on every run.")
+        print("")
+        print("  upsert_car cannot find an existing car, so each run creates new")
+        print("  car and result rows. A session loaded N times serves every")
+        print("  position N times.")
+        print("")
+        print("  Use --dry-run to inspect without writing, or set")
+        print(f"  {OVERRIDE_ENV}=1 to override and accept the duplication.")
+        print("=" * 60)
+        raise SystemExit(2)
+
     print("=" * 60)
     print("OpenWEC — Phase 2, Pass 2: Classification Loader")
     print(f"  Dry run: {dry_run}")
