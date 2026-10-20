@@ -83,8 +83,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS entries_ident_classed
 -- 2. Class absent (pre-2013 exports) and identity settled: fall back to team.
 --    Without a class there is nothing else to tell two entries apart, and
 --    those events are known to mix separate races in one folder.
+--    NULLS NOT DISTINCT because team_id is nullable: without it a NULL team
+--    would compare unequal to itself and the regime would protect nothing.
 CREATE UNIQUE INDEX IF NOT EXISTS entries_ident_unclassed
-    ON entries (competition_id, number, team_id)
+    ON entries (competition_id, number, team_id) NULLS NOT DISTINCT
     WHERE identity_status <> 'ambiguous' AND car_class IS NULL;
 
 -- 3. Ambiguous: the rows must be allowed to coexist, but re-importing the same

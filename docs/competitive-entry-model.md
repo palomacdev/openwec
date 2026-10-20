@@ -106,7 +106,9 @@ UNIQUE (competition_id, number, car_class)
     WHERE identity_status <> 'ambiguous' AND car_class IS NOT NULL;
 
 -- class absent (pre-2013 exports), identity settled
-UNIQUE (competition_id, number, team_id)
+-- NULLS NOT DISTINCT because team_id is nullable: without it a NULL team
+-- compares unequal to itself and this regime protects nothing.
+UNIQUE (competition_id, number, team_id) NULLS NOT DISTINCT
     WHERE identity_status <> 'ambiguous' AND car_class IS NULL;
 
 -- ambiguous: rows must coexist, but re-import must not multiply them
@@ -206,3 +208,28 @@ conflicting groups       : 160
   resolved by source id  : 5
   needing human review   : 155
 ```
+
+Each group carries a `group_id`: `sha256(series | season | event | number |
+class)` truncated to 16 hex characters. It depends on the natural key alone, so
+it survives re-export, database rebuilds and id renumbering — which is what
+makes a decision file replayable:
+
+```
+python scripts/export_ambiguous_entries.py --out new.csv --decisions reviewed.csv
+```
+
+Decisions already recorded against a `group_id` are carried into the new export,
+so review is incremental rather than all-or-nothing.
+
+### Behaviour of the three regimes
+
+Verified against the database, not assumed:
+
+| Case | Result |
+|---|---|
+| Two ambiguous rows differing only by team | kept apart |
+| Two ambiguous rows identical in number, class **and** team | refused — nothing in the model separates them |
+| `team_id` NULL with `car_class` NULL | refused (needed `NULLS NOT DISTINCT`; the first version did not) |
+| Promoting both sides of an ambiguity to `resolved` | second refused — a reviewer must merge or re-key, not flip a flag |
+| Demoting `resolved` → `ambiguous` | allowed; frees the classed regime |
+| Two concurrent imports of the same entry | one row, both transactions return the same id |

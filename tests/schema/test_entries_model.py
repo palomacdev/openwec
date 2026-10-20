@@ -1,6 +1,16 @@
 """
 OpenWEC — Competitive entry model (migration 006)
 
+SCOPE: schema and index behaviour only.
+
+These tests exercise the tables, the three partial unique indexes and the
+ON CONFLICT targets directly. They do NOT exercise the loader: nothing here
+imports database.loader, and the loader still writes to cars/results exactly as
+before. Loader integration against the new model lands in a later PR.
+
+The loader's write guard must never be exercised against a persistent database.
+Overriding it runs a real import; test it only against a throwaway instance.
+
 Proves that competitions/entries behave the way the identity audit requires:
 
   * re-importing the same classification does not create extra entries
@@ -392,3 +402,83 @@ def test_competition_label_is_unique_per_event(cur):
         cur.execute(
             "INSERT INTO competitions (event_id, label) VALUES (%s, 'main')", (ev,)
         )
+
+
+# ── Index regimes under stress ────────────────────────────────────────────
+#
+# Each case below was run against the database before being written down; the
+# unclassed one failed and the index was corrected.
+
+def test_unclassed_regime_protects_null_team(cur):
+    """
+    team_id is nullable. Without NULLS NOT DISTINCT a NULL team compares
+    unequal to itself and the unclassed regime protects nothing, so a re-import
+    silently duplicates. This failed before the index was fixed.
+    """
+    ev = _event(cur)
+    comp = _competition(cur, ev, "main", _ID)
+
+    cur.execute(
+        "INSERT INTO entries (competition_id, number, car_class, team_id, identity_status) "
+        "VALUES (%s, '9', NULL, NULL, 'inferred')",
+        (comp,),
+    )
+    with pytest.raises(psycopg2.errors.UniqueViolation):
+        cur.execute(
+            "INSERT INTO entries (competition_id, number, car_class, team_id, identity_status) "
+            "VALUES (%s, '9', NULL, NULL, 'inferred')",
+            (comp,),
+        )
+
+
+def test_two_ambiguous_rows_with_identical_attributes_cannot_coexist(cur):
+    """
+    Documented limitation. When number, class AND team all match there is
+    nothing left in the model to tell two entries apart, so the ambiguous index
+    rejects the second. Keeping re-import idempotent is worth more than
+    representing a case the data cannot describe.
+    """
+    ev = _event(cur)
+    comp = _competition(cur, ev, "main", _ID)
+    t = _team(cur, "Rev Team", _ID)
+
+    _upsert_entry(cur, comp, "5", "LMP2", t, status="ambiguous")
+    with pytest.raises(psycopg2.errors.UniqueViolation):
+        cur.execute(
+            "INSERT INTO entries (competition_id, number, car_class, team_id, identity_status) "
+            "VALUES (%s, '5', 'LMP2', %s, 'ambiguous')",
+            (comp, t),
+        )
+
+
+def test_resolving_both_sides_of_an_ambiguity_is_refused(cur):
+    """
+    Promoting two ambiguous rows to 'resolved' would assert they are the same
+    identity. The classed index refuses the second UPDATE, so a reviewer has to
+    merge or re-key rather than flip a flag.
+    """
+    ev = _event(cur)
+    comp = _competition(cur, ev, "main", _ID)
+    a = _team(cur, "Team A", _ID)
+    b = _team(cur, "Team B", _ID + 1)
+
+    one = _upsert_entry(cur, comp, "7", "HYPERCAR", a, status="ambiguous")
+    two = _upsert_entry(cur, comp, "7", "HYPERCAR", b, status="ambiguous")
+
+    cur.execute("UPDATE entries SET identity_status = 'resolved' WHERE id = %s", (one,))
+    with pytest.raises(psycopg2.errors.UniqueViolation):
+        cur.execute("UPDATE entries SET identity_status = 'resolved' WHERE id = %s", (two,))
+
+
+def test_demoting_to_ambiguous_frees_the_classed_regime(cur):
+    """The regimes are disjoint, so the transition back must work."""
+    ev = _event(cur)
+    comp = _competition(cur, ev, "main", _ID)
+    a = _team(cur, "Team A", _ID)
+    b = _team(cur, "Team B", _ID + 1)
+
+    one = _upsert_entry(cur, comp, "7", "HYPERCAR", a, status="resolved")
+    cur.execute("UPDATE entries SET identity_status = 'ambiguous' WHERE id = %s", (one,))
+    two = _upsert_entry(cur, comp, "7", "HYPERCAR", b, status="resolved")
+
+    assert one != two

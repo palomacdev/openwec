@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import collections
 import csv
+import hashlib
 import io
 import re
 import sys
@@ -81,6 +82,30 @@ def driver_names(row: dict) -> set[str]:
 def related(a: set[str], b: set[str]) -> bool:
     """A surname in one export is a full name in another. Containment, not equality."""
     return any(x and y and (x in y or y in x) for x in a for y in b)
+
+
+def group_id(series: str, season: str, event: str, number: str, car_class: str) -> str:
+    """
+    Stable identity for an ambiguous group.
+
+    Derived from the natural key only, so it survives re-export, database
+    rebuilds and id renumbering. Two people running the script on the same raw
+    tree get the same ids, which is what makes a decision file replayable.
+    """
+    payload = "".join((series, season, event, number, car_class))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def load_decisions(path: Path | None) -> dict[str, dict]:
+    """Previously recorded decisions, keyed by group_id, carried into the new export."""
+    if not path or not path.is_file():
+        return {}
+    with path.open(newline="", encoding="utf-8") as fh:
+        return {
+            row["group_id"]: row
+            for row in csv.DictReader(fh)
+            if row.get("group_id") and row.get("decision")
+        }
 
 
 def classification_files(event_dir: Path):
@@ -165,21 +190,27 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--raw", default="raw", type=Path)
     parser.add_argument("--out", default="ambiguous_entries.csv", type=Path)
+    parser.add_argument("--decisions", type=Path,
+                        help="previous export; decisions already recorded are carried over")
     args = parser.parse_args(argv)
 
     if not args.raw.is_dir():
         print(f"raw directory not found: {args.raw}", file=sys.stderr)
         return 2
 
+    decisions = load_decisions(args.decisions)
     rows, counts = [], collections.Counter()
     for series, season, event, number, car_class, per_team in collect(args.raw):
         status, reason = verdict(per_team)
         counts[status] += 1
         if status == "resolved":
             continue
+        gid = group_id(series, season, event, number, car_class)
+        previous = decisions.get(gid, {})
         for folded, bucket in sorted(per_team.items()):
             rows.append(
                 {
+                    "group_id": gid,
                     "series": series,
                     "season": season,
                     "event": event,
@@ -191,14 +222,15 @@ def main(argv: list[str] | None = None) -> int:
                     "drivers": " | ".join(sorted(bucket["drivers"])),
                     "sessions": " | ".join(sorted(bucket["sessions"])),
                     "reason": reason,
-                    "decision": "",          # same-entry | distinct-entries
-                    "decided_by": "",
+                    "decision": previous.get("decision", ""),   # same-entry | distinct-entries
+                    "decided_by": previous.get("decided_by", ""),
+                    "decided_at": previous.get("decided_at", ""),
                 }
             )
 
-    fields = ["series", "season", "event", "number", "car_class", "team_spellings",
-              "vehicles", "source_entry_ids", "drivers", "sessions", "reason",
-              "decision", "decided_by"]
+    fields = ["group_id", "series", "season", "event", "number", "car_class",
+              "team_spellings", "vehicles", "source_entry_ids", "drivers",
+              "sessions", "reason", "decision", "decided_by", "decided_at"]
     with args.out.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=fields)
         writer.writeheader()
@@ -208,6 +240,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  resolved by source id  : {counts['resolved']}")
     print(f"  needing human review   : {counts['ambiguous']}")
     print(f"rows written to {args.out}: {len(rows)}")
+    if decisions:
+        print(f"decisions carried over   : {len(decisions)}")
     return 0
 
 
