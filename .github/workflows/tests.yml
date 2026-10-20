@@ -44,6 +44,14 @@ jobs:
         run: |
           PGPASSWORD=openwec psql -h localhost -p 5433 -U openwec -d openwec -f database/schema.sql
 
+      - name: Apply migrations
+        run: |
+          for f in database/migrations/*.sql; do
+            case "$f" in *_down.sql) continue;; esac
+            echo "applying $f"
+            PGPASSWORD=openwec psql -h localhost -p 5433 -U openwec -d openwec -v ON_ERROR_STOP=1 -f "$f"
+          done
+
       - name: Apply test fixtures
         run: |
           PGPASSWORD=openwec psql -h localhost -p 5433 -U openwec -d openwec -f tests/fixtures.sql
