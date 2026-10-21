@@ -427,3 +427,125 @@ been reassigned there, so `ambiguous_match` reviews and superseded anchors are
 both zero across the 431 real events. Verified by comparing competitions,
 anchors, associations, entries, candidates and provenance against a population
 built with the previous rule — byte-identical on every projection.
+
+---
+
+## Resolving a classification row onto an entry
+
+A classification row says "car #51, LMGT3, Ferrari AF Corse, position 3". None
+of that names an entry. `number` is unique within a session — measured, zero
+collisions across 3,240 sessions — but a session is not the scope of an entry:
+Monza 2018 runs two championships in the same Morning session, and one number
+in two competitions of an event is two entries.
+
+The legacy data shows what treating `(session_id, number)` as an identity
+costs. At Imola 2025 the session row named "Race 1" holds #115 as GPA RACING
+over 12 laps and as DC RACING over 8 laps. Two entries, one key.
+
+### Six outcomes, and only two of them resolve
+
+```
+resolved_by_source_id          the source printed an entry-list identifier and
+                               it names an entry of a competition this session
+                               runs, agreeing on number and class
+resolved_by_sole_competition   the session runs exactly one competition
+multiple_candidates            several competitions, nothing in the row places it
+source_id_out_of_scope         the identifier is owned by a competition of this
+                               event that this session does not run
+contradictory_evidence         the identifier names an entry this row does not
+                               describe, or names several at once
+entry_not_found                competition known, no entry with this number and class
+no_association                 the session belongs to no competition at all
+```
+
+An identifier that places nothing is not one thing. It is three, and they are
+kept apart because only the middle one is a warning:
+
+```
+ausente        the row carries none -> the sole competition decides
+fora do escopo owned elsewhere in this event -> the row likely belongs there,
+               so nothing is decided here
+desconhecido   the event has never seen it -> no evidence; the sole competition
+               decides, and the evidence records that it went unrecognised
+```
+
+Measured over the corpus, all 39,062 rows resolved by sole competition carry no
+identifier at all: `source_id_out_of_scope` is zero and the distinction costs
+nothing in coverage today. It exists because without it that path resolves
+silently when the case does arise — after the pending merge hypotheses are
+decided, or when new data lands.
+
+Absence of association, several candidates and contradictory evidence are kept
+apart on purpose. Only one of them is a defect, and collapsing them would hide
+which.
+
+Nothing falls back to choosing among candidates. A multiplicity is an outcome,
+never a tie broken quietly: the adapter contains no `LIMIT 1` and no `MIN(id)`,
+and a test parses its SQL literals to guard that. The test reads the source, so
+it guards against the change being made carelessly rather than proving that no
+such query can exist.
+
+### Measured coverage
+
+```
+linhas de classificacao            : 115694
+  resolved_by_source_id              60873   52.6%
+  resolved_by_sole_competition       39062   33.8%
+  multiple_candidates                    9    0.0%
+  source_id_out_of_scope                 0    0.0%
+  contradictory_evidence               189    0.2%
+  entry_not_found                        0    0.0%
+  no_association                     15561   13.5%
+
+  RESOLVIDAS                         99935   86.4%
+```
+
+The 15,561 unassociated rows are the sessions still waiting on the 77 pending
+merge hypotheses, dominated by the hourly snapshots at Le Mans. None of those
+hypotheses is applied here.
+
+### One identifier, several entries
+
+34 entry-list identifiers name more than one entry of the same competition, and
+not for one reason:
+
+```
+15  the same car number written #03 and #3
+12  genuinely different numbers — at Bahrain 2025, 105154 names both #50 and #51
+ 7  the same number recorded under two classes
+```
+
+They account for the 189 contradictory rows. The resolver refuses them; it does
+not normalise `#03` into `#3`, because masking a defect in the stored identity
+would hide it from the report that has to surface it.
+
+### Legacy result groups that disagree
+
+Of 94,868 `(session, number)` groups in the development database, 85,418 hold
+more than one result row and 98.4% of those agree on everything a reader sees.
+The disagreements:
+
+```
+1062  equipe                        144  voltas
+  55  voltas+equipe                  55  voltas+classe+equipe+veiculo
+  18  voltas+classe+equipe           13  voltas+equipe+veiculo
+   8  posicao+voltas+tempo+equipe     7  posicao+voltas+tempo+classe+equipe
+   6  classe+equipe                   6  voltas+classe
+   2  voltas+classe+veiculo           1  equipe+veiculo
+   1  classe+equipe+veiculo           1  voltas+tempo+classe+equipe
+```
+
+1,379 in total, dominated by team spelling — "KROHN RACING" against "Krohn
+Racing" — which the model has always treated as an attribute rather than an
+identity.
+
+Sixteen groups disagree on finishing position or elapsed time.
+`scripts/export_legacy_divergences.py` writes every copy of those with its
+provenance, choosing nothing. Read them before concluding anything: in every
+case examined the copies describe *different entries* sharing one key, not one
+entry recorded twice with different outcomes.
+
+A note on counting them: `count(DISTINCT x)` returns 0 when every value is
+NULL, so a test for disagreement must be `> 1`. Written as `= 1` it silently
+drops the all-NULL groups, which is how an earlier count of these came out
+wrong.
