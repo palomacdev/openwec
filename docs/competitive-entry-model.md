@@ -1,8 +1,13 @@
 # Competitive entry model
 
-Status: **additive schema only.** Migration 006 creates the tables. Nothing
-reads or writes them yet, and `results`, `laps` and the analytics tables still
-reference `cars` exactly as before.
+Status: **additive schema, populated in isolation only.** Migrations 006-009
+create the tables and `database/populate_competitions.py` fills them from the
+raw exports. `results`, `laps` and the analytics tables still reference `cars`
+exactly as before, and nothing in the API or the dashboard reads any of this
+yet.
+
+The population has only ever been run against a disposable database. The
+script refuses to start otherwise.
 
 This document records why the model looks the way it does, because every part of
 it exists to answer a specific thing the source data does.
@@ -233,3 +238,192 @@ Verified against the database, not assumed:
 | Promoting both sides of an ambiguity to `resolved` | second refused — a reviewer must merge or re-key, not flip a flag |
 | Demoting `resolved` → `ambiguous` | allowed; frees the classed regime |
 | Two concurrent imports of the same entry | one row, both transactions return the same id |
+
+---
+
+## Resolution, identity and matching (007-009)
+
+006 could say whether an *entry* was resolved. It could not say whether the
+**competition** grouping itself was proven, nor which sessions belonged to
+which competition — so a session whose competition was unknown had nowhere to
+exist and would have to be assigned artificially to satisfy a foreign key.
+
+### What each migration adds
+
+```
+007  competitions.resolution (resolved | inferred | provisional)
+     session_competition_candidates — five independently recorded criteria
+     session_competitions — N:N, with 'unresolved' as a first-class state
+008  entries.event_id NOT NULL, entries.competition_id nullable
+     composite FK (competition_id, event_id) -> competitions (id, event_id)
+     six uniqueness regimes instead of three
+009  competitions.identity_uid, evidence_fingerprint, display_name
+     competition_anchors — exclusive vs shared, current vs superseded
+     competition_match_reviews — what was NOT decided automatically
+```
+
+### Four things a content hash was conflating
+
+| | | |
+|---|---|---|
+| `identity_uid` | what the competition **is** | minted once, never recomputed |
+| `evidence_fingerprint` | what has been **observed** | changes freely with the source |
+| `display_name` | what it is **called** | human-facing, no constraint |
+| `competition_anchors` | how a discovery is **matched** | the only thing matching reads |
+
+A content hash fails as identity precisely because the content is meant to
+change: adding the Thursday practice session does not create a different
+championship, but it does change the hash.
+
+### Exclusive and shared evidence
+
+An entry-list identifier belongs to one list, so it identifies on its own. A
+session does not: Monza 2018 runs two championships in the same Morning and
+Afternoon sessions. An entry, as `(number, team)`, does not either: Le Mans
+fields the same cars in the Test Day list and the race list.
+
+Only exclusive anchors are unique per event, and only while `current`. An
+identifier the source has since corrected away becomes `superseded`: the row
+survives as provenance, and stops being able to confirm a match.
+
+Matching by shared evidence alone requires two things, not one — containment of
+the session sets **and** agreement of the entry population. Containment alone
+would match a support series that runs only in Free Practice 1 to the main
+competition, because `{FP1} ⊆ {FP1, FP2, Race}`.
+
+### Four levels of association
+
+| Level | Objective criterion | Result |
+|---|---|---|
+| direct | the session carries identifiers owned by the competition | `resolved`, no timestamp required |
+| eligible | no identifiers, but the session sits inside the competition's time window **or** its `(number, team)` population | `inferred`, only if it is the single eligible candidate |
+| compatible | classes and numbers agree, nothing contradicts, neither time nor population places it | never assigned |
+| indeterminate | too little evidence | never assigned |
+
+Class and number agreement alone never confirms a competition: they say the
+fields look alike, not that they are the same field.
+
+### What the population produced
+
+Measured over the whole raw tree, in a disposable database:
+
+```
+eventos                      431      sessoes                     3240
+competicoes resolved         426      competicoes provisional      165
+associacoes resolved        2855      inferred                     403
+associacoes unresolved       291      sessoes com >1 competicao    285
+inscricoes determinadas    18008      indeterminadas               161
+hipoteses de fusao pendentes  77      aplicadas automaticamente      0
+```
+
+Reconciliation closes exactly:
+
+```
+17201 identidades (evento, numero, classe)
++ 829 presentes em mais de uma competicao do mesmo evento   (32 eventos)
++ 139 do regime sem classe, chaveado por (numero, equipe)   (21 eventos)
+= 18169 = 18008 determinadas + 161 indeterminadas
+```
+
+### The 77 merge hypotheses
+
+One identifier group confined to another's sessions, fielding no class of its
+own, is what an entry list with absentees looks like — and also what a second
+championship confined to shared sessions looks like. None is applied.
+
+```
+python scripts/export_merge_hypotheses.py --out merge_hypotheses.csv
+```
+
+| Priority | Independent corroboration | n |
+|---|---|---:|
+| A | the same entry in both groups under different identifiers | 1 |
+| B | no shared number, teams of the smaller contained in the larger | 20 |
+| C | no shared number, teams partly in common | 24 |
+| D | a number shared by **different** teams — tells against | 0 |
+| E | nothing but the subset heuristic | 32 |
+
+A-E is a priority of investigation, never a verdict. Decisions are carried
+between exports by `hypothesis_id` while `evidence_digest` is unchanged; a
+decision recorded against different evidence comes back marked stale rather
+than being reapplied.
+
+Leaving them unapplied costs 173 session associations: with them, unresolved
+sessions fall from 291 to 118. The entry counts barely move.
+
+### No identifier distance, anywhere
+
+Lists come from the structure of which sessions each identifier appears in.
+Identifier values are only ever compared for equality. Replacing every
+identifier with `"Z" + sha256(id)[:12]` leaves the partition byte-identical:
+
+```
+normal       b652dcc12b5dcbbdab40f39c28c3a303934e8d095182dcdca959dd2279482323
+reetiquetado b652dcc12b5dcbbdab40f39c28c3a303934e8d095182dcdca959dd2279482323
+```
+
+### Continuity: when a shared identifier carries identity forward
+
+An entry-list identifier found in both a discovery and an existing competition
+is where the question starts, not where it ends. The source can move an
+identifier from one list to another, and a bare intersection cannot tell that
+apart from a list that simply grew or shrank.
+
+This was a real defect, found by testing before anything was committed. A
+competition carrying one reassigned identifier inherited the `identity_uid` of
+another, although its sessions and entry population were entirely different —
+a silent merge and a silent identity loss in the same operation:
+
+```
+A: ids={900,901} sessions={S1} population=#1 ALPHA, #2 BETA
+B: ids={900,902} sessions={S9} population=#9 OMEGA, #8 SIGMA
+   -> B silently became A
+```
+
+Five things are now weighed separately, and the identifier intersection is only
+the first of them:
+
+1. exclusive identifiers kept, lost and gained, and whether one set contains the other
+2. continuity of the entry population, by `(number, class)` and team
+3. agreement of the sessions
+4. a reassignment signal — identifiers both lost **and** gained
+5. absence of conflicting claims from other discoveries
+
+**Material contradiction blocks reuse, whatever else agrees.** Corroboration
+has to come from something other than the identifiers, and absence of evidence
+is neither corroboration nor contradiction:
+
+```
+population disjoint, or sessions disjoint   -> contraditoria  -> review
+population agrees, or sessions agree        -> corroborada    -> reuse + record evidence
+neither                                     -> insuficiente   -> review
+```
+
+A contradictory match writes nothing at all: the existing competition keeps its
+`identity_uid`, `evidence_fingerprint`, `evidence`, anchors and provenance
+untouched until a person decides.
+
+Population continuity has three states rather than two, and the third matters.
+A team spelling change — "Corvette Racing" becoming "Corvette Racing - GM" —
+has the same shape in the data as a replacement, and this model has held from
+the start that a team name is an attribute of an entry and never its identity.
+So it decides nothing by itself:
+
+```
+FALSE  the fields are disjoint on (number, class)          -> a different field
+TRUE   they meet and some shared entry carries the same team
+None   they meet but every shared number is spelled differently
+```
+
+Every reuse records what corroborated it, in `competitions.evidence`:
+
+```
+continuidade corroborada: identificadores mantidos=2, perdidos=0, novos=1;
+contencao=sim; populacao=sim; sessoes=sim; reatribuicao=nao
+```
+
+On the current corpus this rule changes no decision: no identifier has ever
+been reassigned there, so `ambiguous_match` reviews and superseded anchors are
+both zero across the 431 real events. Verified by comparing competitions,
+anchors, associations, entries, candidates and provenance against a population
+built with the previous rule — byte-identical on every projection.
