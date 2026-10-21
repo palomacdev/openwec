@@ -147,6 +147,46 @@ In practice, this is rare and affects individual laps, not extended periods.
 
 ## Known limitations and inconsistencies
 
+### Duplicate rows in `results`
+
+`results` holds more than one row for the same car in the same session.
+
+Re-ingestion by the legacy loader is a proven cause. `cars` has no unique
+constraint on any business column, and `upsert_car` runs
+`ON CONFLICT DO NOTHING` with no conflict target — so no conflict is ever
+possible. Every run inserts a new `cars` row, and `results`, whose uniqueness
+is `(session_id, car_id)`, gets a new row with it.
+
+It is not the only cause, and several rows sharing a `(session, car number)`
+are not necessarily duplicates of one another. Two distinct competitive entries
+can share that key: a session can belong to more than one competition, and the
+same car number can be entered in each. `docs/competitive-entry-model.md`
+describes the model built to tell those apart.
+
+How many rows share a key depends on how many times the loader ran over a given
+session and on which of these causes applies, so it varies row by row and
+environment by environment. In the development database the number of rows per
+`(session, car number)` ranges from 1 to 394, with a median of 3; about 10% of
+them have no companion at all. **This has not been measured in any other
+environment.**
+
+There is no verified query that removes these duplicates. Keeping one row per
+`(session, car number)` would give the right answer for the large majority of
+groups, whose rows agree on everything a reader sees, and the wrong answer for
+those where the rows describe different entries.
+
+What this means in practice, in any environment where duplicates are present:
+
+- counting rows in `results` overstates the number of results
+- summing or averaging over `results` weights each result by its row count
+- grouping by `cars.id` splits one car into several groups
+
+`COUNT(DISTINCT ...)` is not a general fix. Whether it corrects a given metric
+depends on what is being counted and on which definition of identity that
+metric needs — counting distinct `(session_id, car number)` pairs, for
+instance, assumes that pair identifies one entry, which is exactly the
+assumption that does not always hold.
+
 ### Missing data (pre-2016 WEC)
 
 WEC races from 2012 to approximately 2015 have sessions in the database
@@ -176,13 +216,19 @@ do not have Wikipedia pages and could not be enriched via Wikidata.
 ### Snapshot sessions (Le Mans 24h)
 
 For 24-hour races, Al Kamel publishes classification snapshots at each hour
-(Hour 1, Hour 2, ...). These appear as separate sessions in the database
-with `snapshot_hour` set accordingly. The final race classification has
-`snapshot_hour = null`. This means the `results` table contains multiple
-rows for the same car in the same event — one per snapshot.
+(Hour 1, Hour 2, ...), as separate files inside the race folder.
 
-When computing career statistics (total races, wins), only sessions with
-`snapshot_hour IS NULL` are counted.
+The classification loader reads only the final hourly file per race, so these
+snapshots do **not** become separate sessions: one race produces one session.
+In the development database `snapshot_hour` is set on 3 sessions out of 5,422,
+none of them a Le Mans race.
+
+Career statistics filter `snapshot_hour IS NULL`. That filter has its own
+meaning — it selects sessions that are not hourly snapshots — and it is not a
+deduplication mechanism. It can exclude sessions that are legitimate results in
+their own right, and it does not address the duplicate rows described under
+[Duplicate rows in `results`](#duplicate-rows-in-results), which have a
+different cause.
 
 ### Team history across seasons
 
