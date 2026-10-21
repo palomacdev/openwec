@@ -37,9 +37,7 @@ DSN = " ".join((
 
 
 @pytest.fixture(scope="module")
-def cur():
-    db = dict(p.split("=", 1) for p in DSN.split() if "=" in p).get("dbname", "")
-    assert db not in ("openwec", "ensaio", "postgres"), f"recusado: {db} nao e descartavel"
+def cur(disposable_db):
     try:
         conn = psycopg2.connect(DSN, connect_timeout=5)
     except psycopg2.OperationalError as exc:

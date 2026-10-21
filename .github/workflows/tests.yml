@@ -64,6 +64,11 @@ jobs:
           DB_NAME: openwec
           DB_USER: openwec
           DB_PASSWORD: openwec
+          # The service container above is created and destroyed with this job.
+          # Suites that write refuse to run without this declaration, because
+          # nothing about a database's name or contents tells a disposable one
+          # from the development instance, which has the same name and port.
+          OPENWEC_TEST_DB_IS_DISPOSABLE: "1"
 
       - name: Run SDK tests (no DB needed)
         run: pytest tests/sdk/ -v

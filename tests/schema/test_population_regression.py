@@ -41,11 +41,8 @@ def pytest_addoption(parser):  # pragma: no cover - pytest hook
 
 
 @pytest.fixture(scope="module")
-def cur(request):
+def cur(request, disposable_db):
     dsn = request.config.getoption("--dsn", default=DEFAULT_DSN)
-    db = dict(p.split("=", 1) for p in dsn.split() if "=" in p).get("dbname", "")
-    assert db not in ("openwec", "ensaio", "postgres"), \
-        f"recusado: {db} nao e um banco descartavel"
     conn = psycopg2.connect(dsn)
     conn.autocommit = True
     c = conn.cursor()
@@ -216,9 +213,16 @@ def test_proveniencia_preservada(cur):
     assert orphan == 0
 
 
-def test_tabelas_historicas_intactas(cur):
-    for table in ("results", "laps", "result_drivers"):
-        assert one(cur, f"SELECT count(*) FROM {table}") == 0
+def test_tabelas_historicas_intactas(cur, historical_baseline):
+    """
+    Nothing in this work writes to results, laps, result_drivers, cars or
+    drivers. Asserting zero would be wrong - the CI fixtures seed them on
+    purpose - so this compares against the counts taken when the suite started.
+    """
+    now = {t: one(cur, f"SELECT count(*) FROM {t}")
+           for t in historical_baseline}
+    assert now == historical_baseline, (
+        f"tabelas historicas mudaram: {historical_baseline} -> {now}")
 
 
 # ── identity under change ─────────────────────────────────────────────────
