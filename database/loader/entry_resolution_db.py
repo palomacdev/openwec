@@ -25,7 +25,18 @@ __all__ = ["load_session_view", "load_event_sessions", "resolve",
 
 
 def _entry_key(entry_id: int) -> str:
-    """A readable, stable handle for an entry inside one report run."""
+    """
+    A local handle for an entry, meaningful only inside one process against one
+    database.
+
+    Deliberately NOT portable: it wraps a row id, so the same string means a
+    different entry in another database and nothing at all after a rebuild.
+    Nothing persists it and no report prints it — it exists so the resolver can
+    say "these two rows are the same entry" within a single run.
+
+    Competition keys are the opposite case, and the contrast is intentional:
+    see _competition_key.
+    """
     return f"entry:{entry_id}"
 
 
@@ -58,10 +69,11 @@ def load_session_view(cur, session_id: int) -> SessionView:
         (session_id,),
     )
     competitions = cur.fetchall()
-    if not competitions:
-        return SessionView(session_key=f"session:{session_id}", competitions=())
-
     comp_ids = [row[0] for row in competitions]
+    foreign = _foreign_source_ids(cur, session_id, comp_ids)
+    if not competitions:
+        return SessionView(session_key=f"session:{session_id}", competitions=(),
+                           foreign_source_ids=foreign)
 
     cur.execute(
         """
@@ -115,7 +127,39 @@ def load_session_view(cur, session_id: int) -> SessionView:
         )
         for competition_id, identity_uid in competitions
     )
-    return SessionView(session_key=f"session:{session_id}", competitions=views)
+    return SessionView(session_key=f"session:{session_id}", competitions=views,
+                       foreign_source_ids=foreign)
+
+
+
+def _foreign_source_ids(cur, session_id: int,
+                        comp_ids: list[int]) -> dict[str, frozenset[str]]:
+    """
+    Identifiers owned by competitions of this event that this session does NOT
+    run.
+
+    Without them the resolver cannot distinguish an identifier belonging
+    somewhere else in the event — a sign the row may not belong to this
+    session's competition at all — from one the event has never seen. Both
+    would look like "no identifier", and only one of them is harmless.
+    """
+    cur.execute(
+        """
+        SELECT si.source_entry_id, c.identity_uid::text
+        FROM entry_source_ids si
+        JOIN entries e ON e.id = si.entry_id
+        JOIN competitions c ON c.id = e.competition_id
+        WHERE e.event_id = (SELECT event_id FROM sessions WHERE id = %s)
+          AND NOT (e.competition_id = ANY(%s))
+        ORDER BY si.source_entry_id, c.identity_uid
+        """,
+        (session_id, comp_ids or [-1]),
+    )
+    gathering: dict[str, set[str]] = {}
+    for source_entry_id, identity_uid in cur.fetchall():
+        gathering.setdefault(source_entry_id, set()).add(
+            _competition_key(identity_uid))
+    return {sid: frozenset(keys) for sid, keys in sorted(gathering.items())}
 
 
 def load_event_sessions(cur, event_id: int) -> list[tuple[int, str]]:

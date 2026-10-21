@@ -50,8 +50,10 @@ def row(number="7", car_class="LMP2", team="ACME", source_id=None):
                              team=team, source_id=source_id)
 
 
-def session(*competitions) -> SessionView:
-    return SessionView(session_key="s", competitions=tuple(competitions))
+def session(*competitions, foreign=None) -> SessionView:
+    return SessionView(session_key="s", competitions=tuple(competitions),
+                       foreign_source_ids={k: frozenset(v)
+                                           for k, v in (foreign or {}).items()})
 
 
 def test_identificador_da_fonte_resolve():
@@ -105,15 +107,49 @@ def test_identificador_que_nomeia_outra_inscricao_e_contraditorio():
     assert "#9" in r.evidence
 
 
-def test_identificador_de_outra_sessao_nao_resolve_mas_nao_contradiz():
+def test_identificador_desconhecido_no_evento_cai_para_competicao_unica():
     """
-    An identifier owned by no competition of this session says nothing about
-    this session. The row falls through to the session's own competitions.
+    An identifier the event has never seen says nothing. The row falls through
+    to the session's own competition, and the evidence records that the
+    identifier went unrecognised rather than passing over it in silence.
     """
     c = competition("A", [entry("e1", "7")], source_ids={"900": "e1"})
     r = resolve(session(c), row(number="7", source_id="999"))
     assert r.outcome is Outcome.RESOLVED_BY_SOLE_COMPETITION
     assert r.entry_key == "e1"
+    assert "999" in r.evidence and "nao e conhecido" in r.evidence
+
+
+def test_identificador_de_outra_competicao_do_evento_nao_resolve():
+    """
+    An identifier owned by a competition of this event that this session does
+    not run is a sign the row belongs elsewhere. Falling through to the sole
+    competition here would place it on an entry the source points away from.
+
+    Measured on the corpus this never happens today: all 39,062 rows resolved
+    by sole competition carry no identifier at all. The distinction exists
+    because the path would otherwise resolve silently when it does.
+    """
+    c = competition("A", [entry("e1", "7")], source_ids={"900": "e1"})
+    r = resolve(session(c, foreign={"777": {"B"}}),
+                row(number="7", source_id="777"))
+    assert r.outcome is Outcome.SOURCE_ID_OUT_OF_SCOPE
+    assert r.entry_key is None
+    assert "B" in r.evidence
+
+
+def test_fora_do_escopo_e_distinto_de_ausente_e_de_contraditorio():
+    """The three cases the rule must keep apart."""
+    c = competition("A", [entry("e1", "7"), entry("e2", "9")],
+                    source_ids={"900": "e2"})
+    ausente = resolve(session(c), row(number="7", source_id=None))
+    fora = resolve(session(c, foreign={"777": {"B"}}),
+                   row(number="7", source_id="777"))
+    contraditorio = resolve(session(c), row(number="7", source_id="900"))
+    assert ausente.outcome is Outcome.RESOLVED_BY_SOLE_COMPETITION
+    assert fora.outcome is Outcome.SOURCE_ID_OUT_OF_SCOPE
+    assert contraditorio.outcome is Outcome.CONTRADICTORY_EVIDENCE
+    assert len({ausente.outcome, fora.outcome, contraditorio.outcome}) == 3
 
 
 def test_competicao_unica_sem_a_inscricao():
@@ -194,6 +230,7 @@ def test_resolucao_e_determinista():
     (Outcome.NO_ASSOCIATION, False),
     (Outcome.MULTIPLE_CANDIDATES, False),
     (Outcome.CONTRADICTORY_EVIDENCE, False),
+    (Outcome.SOURCE_ID_OUT_OF_SCOPE, False),
     (Outcome.ENTRY_NOT_FOUND, False),
 ])
 def test_apenas_dois_desfechos_resolvem(outcome, expected):
@@ -344,6 +381,23 @@ def test_sessao_sem_associacao_nao_resolve(cur):
     assert view.competitions == ()
     decision = resolve(view, row(number="7", car_class="LMP1"))
     assert decision.outcome is Outcome.NO_ASSOCIATION
+
+
+def test_adaptador_carrega_identificadores_de_fora_do_escopo(cur):
+    """
+    A session that runs one of an event's competitions must still see the
+    identifiers owned by the others, or it cannot tell an out-of-scope
+    identifier from an unknown one.
+    """
+    from entry_resolution_db import load_session_view
+    event_id = _event(cur, "LEMANSCUP", "02_2018", "02_AUTODROMO NAZIONALE DI MONZA")
+    session_id = _session(cur, event_id, "Free Practice 1")
+    assert session_id
+    view = load_session_view(cur, session_id)
+    assert len(view.competitions) >= 1
+    assert view.foreign_source_ids,         "Free Practice 1 roda parte das competicoes do evento; as outras tem ids"
+    own = {sid for c in view.competitions for sid in c.source_ids}
+    assert not (own & set(view.foreign_source_ids)),         "um identificador nao pode ser proprio e de fora ao mesmo tempo"
 
 
 def test_adaptador_e_somente_leitura(cur):

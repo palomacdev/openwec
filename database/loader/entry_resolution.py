@@ -33,9 +33,11 @@ responses and only one of them is a defect:
   MULTIPLE_CANDIDATES        the session runs several competitions and nothing
                              in the row says which — the row is real, its
                              competition is not determined
-  CONTRADICTORY_EVIDENCE     the row carries an identifier that names an entry
-                             this session does not run, or whose number and
-                             class disagree with the row
+  SOURCE_ID_OUT_OF_SCOPE     the row carries an identifier owned by a
+                             competition of this event that this session does
+                             not run — the row probably belongs elsewhere
+  CONTRADICTORY_EVIDENCE     the identifier names an entry this row does not
+                             describe, or names several at once
   ENTRY_NOT_FOUND            the competition is determined but holds no entry
                              with this number and class
 
@@ -45,7 +47,7 @@ an outcome, never a tie broken quietly.
 from __future__ import annotations
 
 import enum
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Mapping
 
 
@@ -54,6 +56,7 @@ class Outcome(enum.Enum):
     RESOLVED_BY_SOLE_COMPETITION = "resolved_by_sole_competition"
     NO_ASSOCIATION = "no_association"
     MULTIPLE_CANDIDATES = "multiple_candidates"
+    SOURCE_ID_OUT_OF_SCOPE = "source_id_out_of_scope"
     CONTRADICTORY_EVIDENCE = "contradictory_evidence"
     ENTRY_NOT_FOUND = "entry_not_found"
 
@@ -99,8 +102,15 @@ class CompetitionView:
 
 @dataclass(frozen=True)
 class SessionView:
+    """
+    `foreign_source_ids` maps an identifier known ELSEWHERE in this event to
+    the competitions that own it. Without it the resolver cannot tell an
+    identifier belonging to a competition this session does not run from one
+    the event has never seen, and would treat both as absent.
+    """
     session_key: str
     competitions: tuple[CompetitionView, ...]
+    foreign_source_ids: Mapping[str, frozenset[str]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -145,6 +155,7 @@ def resolve(session: SessionView, row: ClassificationRow) -> Resolution:
     """Decide which entry a classification row belongs to, or why it cannot."""
     competitions = session.competitions
     keys = tuple(c.competition_key for c in competitions)
+    unrecognised: str | None = None
 
     # 1. An identifier the source itself printed, when it names an entry of a
     #    competition this session runs. Nothing corroborates better.
@@ -185,10 +196,20 @@ def resolve(session: SessionView, row: ClassificationRow) -> Resolution:
                 f"identificador {row.source_id} pertence a "
                 f"{len(owners)} competicoes desta sessao",
                 keys)
-        # Owned by no competition of this session. It may belong to another
-        # session's list entirely; either way it does not place this row.
+        # Owned by no competition this session runs. Two very different
+        # situations, and collapsing them would hide the dangerous one.
+        elsewhere = session.foreign_source_ids.get(row.source_id)
+        if elsewhere:
+            return Resolution(
+                Outcome.SOURCE_ID_OUT_OF_SCOPE, None,
+                f"identificador {row.source_id} pertence a "
+                f"{', '.join(sorted(elsewhere))}, que esta sessao nao roda",
+                keys)
+        # Known nowhere in the event: no evidence either way. The row falls
+        # through to the session's own competitions, and the evidence says so.
+        unrecognised = row.source_id
 
-    # 2. No usable identifier. The session's own competitions decide.
+    # 2. No identifier that places the row. The session's competitions decide.
     if not competitions:
         return Resolution(
             Outcome.NO_ASSOCIATION, None,
@@ -209,8 +230,10 @@ def resolve(session: SessionView, row: ClassificationRow) -> Resolution:
             f"competicao {competition.competition_key} nao tem inscricao "
             f"#{row.number} {row.car_class or 'sem classe'}",
             keys)
+    note = (f"; identificador {unrecognised} nao e conhecido neste evento"
+            if unrecognised else "")
     return Resolution(
         Outcome.RESOLVED_BY_SOLE_COMPETITION, entry.entry_key,
         f"sessao roda somente {competition.competition_key}; inscricao "
-        f"#{entry.number} {entry.car_class or 'sem classe'}",
+        f"#{entry.number} {entry.car_class or 'sem classe'}{note}",
         keys)

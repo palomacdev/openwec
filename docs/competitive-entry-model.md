@@ -450,11 +450,30 @@ resolved_by_source_id          the source printed an entry-list identifier and
                                runs, agreeing on number and class
 resolved_by_sole_competition   the session runs exactly one competition
 multiple_candidates            several competitions, nothing in the row places it
+source_id_out_of_scope         the identifier is owned by a competition of this
+                               event that this session does not run
 contradictory_evidence         the identifier names an entry this row does not
                                describe, or names several at once
 entry_not_found                competition known, no entry with this number and class
 no_association                 the session belongs to no competition at all
 ```
+
+An identifier that places nothing is not one thing. It is three, and they are
+kept apart because only the middle one is a warning:
+
+```
+ausente        the row carries none -> the sole competition decides
+fora do escopo owned elsewhere in this event -> the row likely belongs there,
+               so nothing is decided here
+desconhecido   the event has never seen it -> no evidence; the sole competition
+               decides, and the evidence records that it went unrecognised
+```
+
+Measured over the corpus, all 39,062 rows resolved by sole competition carry no
+identifier at all: `source_id_out_of_scope` is zero and the distinction costs
+nothing in coverage today. It exists because without it that path resolves
+silently when the case does arise — after the pending merge hypotheses are
+decided, or when new data lands.
 
 Absence of association, several candidates and contradictory evidence are kept
 apart on purpose. Only one of them is a defect, and collapsing them would hide
@@ -473,6 +492,7 @@ linhas de classificacao            : 115694
   resolved_by_source_id              60873   52.6%
   resolved_by_sole_competition       39062   33.8%
   multiple_candidates                    9    0.0%
+  source_id_out_of_scope                 0    0.0%
   contradictory_evidence               189    0.2%
   entry_not_found                        0    0.0%
   no_association                     15561   13.5%
