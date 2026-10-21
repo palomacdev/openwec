@@ -1,5 +1,5 @@
 """
-OpenWEC — Competitive entry model (migration 006)
+OpenWEC — Competitive entry model (migrations 006 and 008)
 
 SCOPE: schema and index behaviour only.
 
@@ -116,25 +116,32 @@ def _upsert_entry(cur, competition_id, number, car_class, team_id, status="infer
     The write the loader will eventually perform. Conflict target is the
     partial index for the regime this row belongs to.
     """
+    determined = "AND competition_id IS NOT NULL"
     if status == "ambiguous":
         target = "(competition_id, number, car_class, team_id)"
-        where = "WHERE identity_status = 'ambiguous'"
+        where = f"WHERE identity_status = 'ambiguous' {determined}"
     elif car_class is not None:
         target = "(competition_id, number, car_class)"
-        where = "WHERE identity_status <> 'ambiguous' AND car_class IS NOT NULL"
+        where = ("WHERE identity_status <> 'ambiguous' AND car_class IS NOT NULL "
+                 f"{determined}")
     else:
         target = "(competition_id, number, team_id)"
-        where = "WHERE identity_status <> 'ambiguous' AND car_class IS NULL"
+        where = ("WHERE identity_status <> 'ambiguous' AND car_class IS NULL "
+                 f"{determined}")
 
+    # event_id comes from the competition rather than the call site: 008 made it
+    # NOT NULL and tied the pair together with a composite foreign key, so an
+    # entry can no longer be written without the event its competition is in.
     cur.execute(
         f"""
-        INSERT INTO entries (competition_id, number, car_class, team_id, identity_status)
-        VALUES (%s, %s, %s, %s, %s)
+        INSERT INTO entries (competition_id, event_id, number, car_class, team_id,
+                             identity_status)
+        SELECT %s, c.event_id, %s, %s, %s, %s FROM competitions c WHERE c.id = %s
         ON CONFLICT {target} {where}
             DO UPDATE SET team_id = EXCLUDED.team_id
         RETURNING id
         """,
-        (competition_id, number, car_class, team_id, status),
+        (competition_id, number, car_class, team_id, status, competition_id),
     )
     return cur.fetchone()[0]
 
@@ -152,18 +159,67 @@ def test_migration_objects_exist(cur):
     assert found == {"competitions", "entries", "entry_team_history", "entry_source_ids"}, found
 
 
-def test_three_uniqueness_regimes_exist(cur):
-    """One index per regime. A single index would be wrong for two of them."""
+def test_six_uniqueness_regimes_exist(cur):
+    """
+    One index per regime. 006 had three; 008 split each in two, because the
+    scope of an identity is the competition when one is known and the event
+    when none is. Keeping competition_id in the key for undetermined entries
+    would make every NULL competition in the database one scope, so #065 LMP3
+    at Monza would collide with #065 LMP3 at Spa.
+    """
     cur.execute(
-        "SELECT indexname FROM pg_indexes "
-        "WHERE tablename = 'entries' AND indexname LIKE 'entries_ident%'"
+        "SELECT indexname FROM pg_indexes WHERE tablename = 'entries' "
+        "AND (indexname LIKE 'entries_ident%' OR indexname LIKE 'entries_undet%')"
     )
     names = {r[0] for r in cur.fetchall()}
     assert names == {
         "entries_ident_classed",
         "entries_ident_unclassed",
         "entries_ident_ambiguous",
+        "entries_undet_classed",
+        "entries_undet_unclassed",
+        "entries_undet_ambiguous",
     }, names
+
+
+def test_entry_is_scoped_to_its_event(cur):
+    """008: a competition assigned to an entry must belong to the entry's event."""
+    ev_a = _event(cur)
+    # _event pins a fixed id, so the second event is built alongside it.
+    cur.execute(
+        "INSERT INTO events (id, season_id, raw_id, name, round) "
+        "VALUES (%s, %s, 'entries-test-b', 'Entries Test Event B', 2) RETURNING id",
+        (_ID + 1, _ID),
+    )
+    ev_b = cur.fetchone()[0]
+    comp_b = _competition(cur, ev_b, "outro-evento", _ID + 50)
+    with pytest.raises(psycopg2.errors.ForeignKeyViolation):
+        cur.execute(
+            "INSERT INTO entries (competition_id, event_id, number, car_class, "
+            "identity_status) VALUES (%s, %s, '7', 'LMP2', 'resolved')",
+            (comp_b, ev_a),
+        )
+
+
+def test_undetermined_entry_needs_no_competition(cur):
+    """
+    008: competition_id NULL means the entry belongs to the event and its
+    competition has not been determined. Monza 2018 #065 Graff is the case.
+    Re-importing it must not add a second row.
+    """
+    ev = _event(cur)
+    cur.execute(
+        "INSERT INTO entries (competition_id, event_id, number, car_class, "
+        "identity_status) VALUES (NULL, %s, '065', 'LMP3', 'inferred') RETURNING id",
+        (ev,),
+    )
+    assert cur.fetchone()[0]
+    with pytest.raises(psycopg2.errors.UniqueViolation):
+        cur.execute(
+            "INSERT INTO entries (competition_id, event_id, number, car_class, "
+            "identity_status) VALUES (NULL, %s, '065', 'LMP3', 'inferred')",
+            (ev,),
+        )
 
 
 def test_results_and_laps_untouched_by_this_migration(cur):
@@ -236,7 +292,9 @@ def test_monza_2018_two_competitions_keep_separate_entries(cur):
     b = _upsert_entry(cur, other, "3", "LMP3", united, status="resolved")
 
     assert a != b, "entries proven distinct were merged"
-    cur.execute("SELECT count(*) FROM entries WHERE number = '3'")
+    # Scoped to this event: the suite also runs against a populated database,
+    # where #3 exists in plenty of real competitions.
+    cur.execute("SELECT count(*) FROM entries WHERE number = '3' AND event_id = %s", (ev,))
     assert cur.fetchone()[0] == 2
 
 
@@ -359,9 +417,13 @@ def test_ambiguous_entries_coexist_and_are_marked(cur):
     )
 
     assert a != b, "ambiguous entries were merged"
+    # Scoped to this competition: the suite also runs against a populated
+    # database, where real ambiguous entries exist and a global count would
+    # pick them up.
     cur.execute(
-        "SELECT count(*) FROM entries "
-        "WHERE identity_status = 'ambiguous' AND review_note IS NOT NULL"
+        "SELECT count(*) FROM entries WHERE competition_id = %s "
+        "AND identity_status = 'ambiguous' AND review_note IS NOT NULL",
+        (comp,),
     )
     assert cur.fetchone()[0] == 2
 
@@ -389,9 +451,10 @@ def test_settled_duplicate_is_rejected_by_the_index(cur):
 
     with pytest.raises(psycopg2.errors.UniqueViolation):
         cur.execute(
-            "INSERT INTO entries (competition_id, number, car_class, team_id, identity_status) "
-            "VALUES (%s, '7', 'HYPERCAR', %s, 'resolved')",
-            (comp, t),
+            "INSERT INTO entries (competition_id, event_id, number, car_class, team_id, identity_status) "
+            "SELECT %s, c.event_id, '7', 'HYPERCAR', %s, 'resolved' "
+            "FROM competitions c WHERE c.id = %s",
+            (comp, t, comp),
         )
 
 
@@ -419,15 +482,17 @@ def test_unclassed_regime_protects_null_team(cur):
     comp = _competition(cur, ev, "main", _ID)
 
     cur.execute(
-        "INSERT INTO entries (competition_id, number, car_class, team_id, identity_status) "
-        "VALUES (%s, '9', NULL, NULL, 'inferred')",
-        (comp,),
+        "INSERT INTO entries (competition_id, event_id, number, car_class, team_id, identity_status) "
+        "SELECT %s, c.event_id, '9', NULL, NULL, 'inferred' "
+        "FROM competitions c WHERE c.id = %s",
+        (comp, comp),
     )
     with pytest.raises(psycopg2.errors.UniqueViolation):
         cur.execute(
-            "INSERT INTO entries (competition_id, number, car_class, team_id, identity_status) "
-            "VALUES (%s, '9', NULL, NULL, 'inferred')",
-            (comp,),
+            "INSERT INTO entries (competition_id, event_id, number, car_class, team_id, identity_status) "
+            "SELECT %s, c.event_id, '9', NULL, NULL, 'inferred' "
+            "FROM competitions c WHERE c.id = %s",
+            (comp, comp),
         )
 
 
@@ -445,9 +510,10 @@ def test_two_ambiguous_rows_with_identical_attributes_cannot_coexist(cur):
     _upsert_entry(cur, comp, "5", "LMP2", t, status="ambiguous")
     with pytest.raises(psycopg2.errors.UniqueViolation):
         cur.execute(
-            "INSERT INTO entries (competition_id, number, car_class, team_id, identity_status) "
-            "VALUES (%s, '5', 'LMP2', %s, 'ambiguous')",
-            (comp, t),
+            "INSERT INTO entries (competition_id, event_id, number, car_class, team_id, identity_status) "
+            "SELECT %s, c.event_id, '5', 'LMP2', %s, 'ambiguous' "
+            "FROM competitions c WHERE c.id = %s",
+            (comp, t, comp),
         )
 
 
