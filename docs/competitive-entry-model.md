@@ -549,3 +549,94 @@ A note on counting them: `count(DISTINCT x)` returns 0 when every value is
 NULL, so a test for disagreement must be `> 1`. Written as `= 1` it silently
 drops the all-NULL groups, which is how an earlier count of these came out
 wrong.
+
+---
+
+## Observational history (010)
+
+Migration 008 keys an entry on `(competition, number, class)`. The audit of the
+34 shared source identifiers found four mechanisms behind them, and two are
+consequences of that key rather than defects of the source: seven entries whose
+class is refined mid-event, and fifteen at Monza 2018 whose number is written
+padded in two files.
+
+So class and number are recorded as things **observed**, per source row. What
+to do about the entries that split is not decided by this migration, and the
+key is untouched.
+
+### The grain is the raw observation
+
+One row per entry, per source file, per version of that file, per line — not
+one row per entry per session. The source publishes a session several times:
+
+```
+arquivos por estagio: Provisional 65, Unofficial 78, Official 61
+sessoes com 2 arquivos: 66   com 3: 56   com 4: 1
+sessoes onde dois arquivos sao byte-identicos: 69
+```
+
+Keying on the digest alone would collapse a byte-identical Provisional and
+Official into one row. No value would be lost — the bytes are equal — but the
+fact that the source published both would be, and the revision stage lives in
+the file name.
+
+```sql
+UNIQUE (entry_id, source_file, source_digest, source_line)
+```
+
+| Case | Preserved |
+|---|---|
+| several files of one session | yes, different paths |
+| `Provisional` and `Official`, byte-identical | **yes** — what the digest alone lost |
+| a file revised | yes, different digest |
+| a revision that only reorders rows | yes, the bytes change |
+| the same file ingested again | refused, idempotent |
+| one event duplicated across two series | yes, different `entry_id` |
+| two rows for one entry in one file | yes, different line |
+
+`source_line` discriminates nothing today — zero repeated rows and zero
+same-entry duplicates across 3,436 files — but a store of raw observations has
+to be able to hold both rather than refuse the second.
+
+### No timestamp is invented
+
+Searched and not found: no classification file carries a date or time column
+with absolute meaning, there is no metadata preamble before the header, and
+nothing records when a file was published or revised. The filesystem mtime is
+the local download — files from a 2025 event are dated 2026-05-19.
+
+The weather files do carry UTC time, but they date the **session**, not the
+observation of a class or a number. Using them here would invent precision the
+source does not give.
+
+```sql
+source_observed_at TIMESTAMPTZ,                    -- NULL today, always
+source_time_basis  source_time_basis NOT NULL DEFAULT 'none',
+ingested_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),   -- the write, only
+
+CHECK ((source_time_basis = 'none') = (source_observed_at IS NULL))
+```
+
+Only `none` occurs. `file_published` and `row_timestamp` are the shapes a
+source could provide, so a future value cannot be written without declaring
+where it came from.
+
+### Evidence is not deleted implicitly
+
+`ON DELETE RESTRICT` on both `entry_id` and `session_id`. Deleting an entry or
+a session that has observations is refused; consolidating entries later has to
+move the history first, as a deliberate act. Reverting the migration refuses
+while either table holds rows, unless `openwec.allow_history_loss` is set in
+that session.
+
+### Indexes
+
+No index on `(entry_id)` alone: the UNIQUE constraint already indexes it as a
+leading column and a btree serves that lookup. `entry_team_history` carries
+exactly that redundancy today; 010 does not repeat it.
+
+```
+UNIQUE (entry_id, source_file, source_digest, source_line)   identity and idempotency
+       (session_id)                                          what a session observed
+       (source_digest)                                       what a file version observed
+```
