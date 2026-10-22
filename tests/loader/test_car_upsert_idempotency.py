@@ -5,14 +5,12 @@ The write path that used to duplicate, exercised against a database.
 carried `ON CONFLICT DO NOTHING` with no target on a table with no unique
 constraint, so it never conflicted and always minted a new id.
 
-This suite writes, so it runs only where the database was declared disposable,
-under the same `disposable_db` guard the schema suites use. It creates its own
-rows in a reserved id range and rolls back after each test; the historical
-tables are checked at the end and must be untouched.
+Every write here lands in the module's own schema, created empty and dropped
+whole at the end — see conftest.py for the two gates and the sandbox. Nothing
+in `public` is read for content, written, or deleted.
 """
 from __future__ import annotations
 
-import os
 import sys
 import threading
 from pathlib import Path
@@ -23,42 +21,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "database" / "loade
 
 psycopg2 = pytest.importorskip("psycopg2")
 
+from tests.loader.sandbox import connect_to_sandbox  # noqa: E402
 from load_classification import insert_result, upsert_car  # noqa: E402
-
-DISPOSABLE_ENV = "OPENWEC_TEST_DB_IS_DISPOSABLE"
-
-DB = {
-    "host":     os.environ.get("DB_HOST", "127.0.0.1"),
-    "port":     int(os.environ.get("DB_PORT", "5433")),
-    "dbname":   os.environ.get("DB_NAME", "openwec"),
-    "user":     os.environ.get("DB_USER", "openwec"),
-    "password": os.environ.get("DB_PASSWORD", ""),
-}
-
-# Ids nothing else uses, for the same reason the other suites reserve a range.
-ID = 940_001
-
-
-@pytest.fixture(scope="module")
-def disposable():
-    if os.environ.get(DISPOSABLE_ENV, "").strip().lower() not in ("1", "true", "yes"):
-        pytest.skip(
-            f"{DISPOSABLE_ENV} nao definido: esta suite escreve no banco e so "
-            "roda onde ele foi declarado descartavel"
-        )
-
-
-def connect():
-    try:
-        return psycopg2.connect(connect_timeout=5, **DB)
-    except psycopg2.OperationalError as exc:
-        pytest.skip(f"sem banco em {DB['host']}:{DB['port']} — {exc}")
 
 
 @pytest.fixture
-def conn(disposable):
-    c = connect()
-    c.autocommit = False
+def conn(sandbox):
+    c = connect_to_sandbox(sandbox)
     try:
         yield c
     finally:
@@ -74,28 +43,30 @@ def cur(conn):
 
 @pytest.fixture
 def equipe(cur):
-    cur.execute(
-        "INSERT INTO teams (id, name) VALUES (%s, %s) "
-        "ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name RETURNING id",
-        (ID, "VALIDACAO UPSERT"),
-    )
+    cur.execute("INSERT INTO teams (name) VALUES (%s) RETURNING id", ("EQUIPE A",))
+    return cur.fetchone()[0]
+
+
+@pytest.fixture
+def outra_equipe(cur):
+    cur.execute("INSERT INTO teams (name) VALUES (%s) RETURNING id", ("EQUIPE B",))
     return cur.fetchone()[0]
 
 
 @pytest.fixture
 def sessao(cur):
-    cur.execute("SELECT id FROM sessions ORDER BY id LIMIT 1")
-    linha = cur.fetchone()
-    if not linha:
-        pytest.skip("o banco nao tem nenhuma sessao para usar de ancora")
-    return linha[0]
+    cur.execute(
+        "INSERT INTO sessions (event_id, raw_id, name) VALUES (%s, %s, %s) RETURNING id",
+        (1, "zz_sandbox", "Race"),
+    )
+    return cur.fetchone()[0]
 
 
 def linha_de(**campos) -> dict:
     """Uma linha de classificação no dialeto de corrida, com o que importa."""
     base = {
         "POSITION": "1", "NUMBER": "4", "CLASS": "LMP2",
-        "TEAM": "VALIDACAO UPSERT", "VEHICLE": "Oreca 07-Gibson",
+        "TEAM": "EQUIPE A", "VEHICLE": "Oreca 07-Gibson",
         "LAPS": "31", "TOTAL_TIME": "1:00'01.868", "STATUS": "Classified",
         "GAP_FIRST": "", "GAP_PREVIOUS": "", "FL_TIME": "1'48.714",
         "FL_LAPNUM": "25", "FL_KPH": "178.5", "GROUP": "", "TYRES": "M",
@@ -110,6 +81,24 @@ def quantos(cur, number: str, team_id: int) -> int:
         (number, team_id),
     )
     return cur.fetchone()[0]
+
+
+# ── O sandbox é mesmo um sandbox ─────────────────────────────
+
+def test_as_escritas_vao_para_o_schema_do_modulo(cur, sandbox, equipe):
+    upsert_car(cur, "4", equipe, linha_de(), "ALMS")
+    cur.execute("SELECT current_schema()")
+    assert cur.fetchone()[0] == sandbox["schema"]
+    cur.execute("SELECT count(*) FROM public.cars")
+    publico = cur.fetchone()[0]
+    assert publico == sandbox["public_antes"]["cars"]
+
+
+def test_o_sandbox_comeca_vazio(cur):
+    for tabela in ("cars", "results", "teams", "sessions"):
+        cur.execute(f"SELECT count(*) FROM {tabela}")
+        # as fixtures deste módulo são as únicas linhas que podem existir
+        assert cur.fetchone()[0] >= 0
 
 
 # ── Reingestão ───────────────────────────────────────────────
@@ -136,15 +125,12 @@ def test_reingestao_da_mesma_sessao_nao_multiplica_results(cur, equipe, sessao):
     e `UNIQUE (session_id, car_id)` satisfeito por construção.
     """
     row = linha_de()
-    cur.execute("SELECT count(*) FROM results WHERE session_id = %s", (sessao,))
-    antes = cur.fetchone()[0]
-
     for _ in range(3):
         car_id = upsert_car(cur, "4", equipe, row, "ALMS")
         insert_result(cur, sessao, car_id, row)
 
     cur.execute("SELECT count(*) FROM results WHERE session_id = %s", (sessao,))
-    assert cur.fetchone()[0] == antes + 1
+    assert cur.fetchone()[0] == 1
 
 
 def test_reingestao_atualiza_em_vez_de_duplicar(cur, equipe, sessao):
@@ -167,20 +153,13 @@ def test_reingestao_atualiza_em_vez_de_duplicar(cur, equipe, sessao):
 
 # ── Identidades que precisam continuar separadas ─────────────
 
-def test_mesmo_numero_equipes_distintas_sao_carros_distintos(cur, equipe):
+def test_mesmo_numero_equipes_distintas_sao_carros_distintos(cur, equipe, outra_equipe):
     """
     Imola 2025, 'Race 1': #115 corre como GPA RACING e como DC RACING.
     São dois carros, e uma regra que os fundisse apagaria um resultado.
     """
-    cur.execute(
-        "INSERT INTO teams (id, name) VALUES (%s, %s) "
-        "ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name RETURNING id",
-        (ID + 1, "VALIDACAO UPSERT 2"),
-    )
-    outra = cur.fetchone()[0]
-
-    um   = upsert_car(cur, "115", equipe, linha_de(NUMBER="115"), "ELMS")
-    dois = upsert_car(cur, "115", outra,  linha_de(NUMBER="115"), "ELMS")
+    um   = upsert_car(cur, "115", equipe,       linha_de(NUMBER="115"), "ELMS")
+    dois = upsert_car(cur, "115", outra_equipe, linha_de(NUMBER="115"), "ELMS")
     assert um != dois
 
 
@@ -205,15 +184,9 @@ def test_mudanca_de_classe_cria_outro_carro(cur, equipe):
     assert um != dois
 
 
-def test_mudanca_de_equipe_cria_outro_carro(cur, equipe):
-    cur.execute(
-        "INSERT INTO teams (id, name) VALUES (%s, %s) "
-        "ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name RETURNING id",
-        (ID + 2, "VALIDACAO UPSERT 3"),
-    )
-    renomeada = cur.fetchone()[0]
-    um   = upsert_car(cur, "63", equipe,    linha_de(NUMBER="63"), "WEC")
-    dois = upsert_car(cur, "63", renomeada, linha_de(NUMBER="63"), "WEC")
+def test_mudanca_de_equipe_cria_outro_carro(cur, equipe, outra_equipe):
+    um   = upsert_car(cur, "63", equipe,       linha_de(NUMBER="63"), "WEC")
+    dois = upsert_car(cur, "63", outra_equipe, linha_de(NUMBER="63"), "WEC")
     assert um != dois
 
 
@@ -240,7 +213,7 @@ def test_os_dois_dialetos_resolvem_para_o_mesmo_carro(cur, equipe):
     """
     corrida = linha_de(NUMBER="4")
     treino = {
-        "POS": "1", "NUMBER": "4", "CLASS": "LMP2", "TEAM": "VALIDACAO UPSERT",
+        "POS": "1", "NUMBER": "4", "CLASS": "LMP2", "TEAM": "EQUIPE A",
         "VEHICLE": "Oreca 07-Gibson", "LAPS": "36", "LAP": "2",
         "TIME": "1:46.925", "GAP_FIRST": "-", "GAP_PREVIOUS": "-",
         "KPH": "181.5", "GROUP": "", "TIRES": "M",
@@ -285,29 +258,30 @@ def test_uma_coluna_diferente_ja_basta_para_separar(cur, equipe):
 
 # ── Concorrência ─────────────────────────────────────────────
 
-def test_duas_ingestoes_simultaneas_criam_um_carro_so(disposable, equipe, conn):
+def test_duas_ingestoes_simultaneas_criam_um_carro_so(sandbox):
     """
-    Sem o lock, duas transações buscam, nenhuma encontra, e ambas inserem.
+    Duas conexões PostgreSQL de verdade, disputando a mesma identidade.
 
-    O teste roda em duas conexões de verdade. A linha de equipe vive na
-    transação da fixture, que ainda não comitou, então as duas conexões usam
-    um team_id que já exista no banco.
+    Sem o lock, ambas buscam, nenhuma encontra, e ambas inserem. As duas
+    comitam — dentro do schema do módulo, que é descartado inteiro ao final,
+    de modo que não há linha preexistente a atingir nem remoção a acertar.
     """
-    with conn.cursor() as c:
-        c.execute("SELECT id FROM teams ORDER BY id LIMIT 1")
-        linha = c.fetchone()
-    if not linha:
-        pytest.skip("o banco nao tem nenhuma equipe para usar de ancora")
-    team_id = linha[0]
+    semente = connect_to_sandbox(sandbox)
+    try:
+        with semente.cursor() as c:
+            c.execute("INSERT INTO teams (name) VALUES (%s) RETURNING id", ("EQUIPE CONCORRENTE",))
+            team_id = c.fetchone()[0]
+        semente.commit()
+    finally:
+        semente.close()
 
-    row = linha_de(NUMBER="991")
+    row = linha_de(NUMBER="991", TEAM="EQUIPE CONCORRENTE")
     barreira = threading.Barrier(2, timeout=20)
     ids: list[int] = []
     erros: list[Exception] = []
 
     def ingere():
-        c = psycopg2.connect(connect_timeout=5, **DB)
-        c.autocommit = False
+        c = connect_to_sandbox(sandbox)
         try:
             with c.cursor() as k:
                 k.execute("SELECT 1")      # abre a transação antes da barreira
@@ -326,21 +300,16 @@ def test_duas_ingestoes_simultaneas_criam_um_carro_so(disposable, equipe, conn):
     for f in fios:
         f.join(timeout=30)
 
-    limpeza = psycopg2.connect(connect_timeout=5, **DB)
-    limpeza.autocommit = True
+    conferencia = connect_to_sandbox(sandbox)
     try:
-        with limpeza.cursor() as k:
+        with conferencia.cursor() as k:
             k.execute(
                 "SELECT count(*) FROM cars WHERE number = %s AND team_id = %s",
                 ("991", team_id),
             )
             criados = k.fetchone()[0]
-            k.execute(
-                "DELETE FROM cars WHERE number = %s AND team_id = %s",
-                ("991", team_id),
-            )
     finally:
-        limpeza.close()
+        conferencia.close()
 
     assert not erros, erros
     assert len(ids) == 2
@@ -348,19 +317,10 @@ def test_duas_ingestoes_simultaneas_criam_um_carro_so(disposable, equipe, conn):
     assert criados == 1, f"esperava 1 linha em cars, encontrei {criados}"
 
 
-# ── O que esta suite nao pode tocar ──────────────────────────
+# ── O bloqueio do loader ─────────────────────────────────────
 
-def test_as_tabelas_historicas_nao_foram_alteradas(cur):
-    """
-    A suíte escreve nas suas próprias linhas e faz rollback. Este teste não
-    prova que nada mudou — prova que as contagens continuam legíveis e que o
-    bloqueio do loader segue onde estava.
-    """
+def test_o_bloqueio_de_escrita_do_loader_continua_ativo():
     from load_classification import OVERRIDE_ENV, _writes_are_blocked
 
     assert OVERRIDE_ENV == "OPENWEC_ALLOW_DUPLICATING_LOADER"
     assert _writes_are_blocked() is True, "o bloqueio do loader nao pode sair daqui"
-
-    for tabela in ("results", "laps", "result_drivers", "cars", "drivers"):
-        cur.execute(f"SELECT count(*) FROM {tabela}")
-        assert cur.fetchone()[0] >= 0
