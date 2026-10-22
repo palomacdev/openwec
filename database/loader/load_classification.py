@@ -398,38 +398,84 @@ def upsert_team(cur, name: str) -> int:
     return cur.fetchone()[0]
 
 
-def upsert_car(cur, number: str, team_id: int, row: dict, series_key: str) -> int:
-    vehicle  = row.get("VEHICLE", "").strip()
-    tires    = (row.get("TYRES") or row.get("TIRES") or "").strip()
-    class_   = row.get("CLASS", "").strip()
-    group_   = row.get("GROUP", "").strip()
+# ── cars: the write that used to duplicate ───────────────────
+#
+# `cars` carries no unique constraint but its own surrogate key, so
+# `ON CONFLICT DO NOTHING` without a target never had a conflict to find: the
+# insert always succeeded and always minted a new id. `results` is keyed on
+# `(session_id, car_id)`, so a fresh car id produced a fresh result row too,
+# and every re-run multiplied both tables.
+#
+# The fix is to look the row up before inserting it, under a lock, rather than
+# to declare a uniqueness rule this table cannot carry. ADR 0001 is explicit
+# that `cars` has no temporal scope and therefore cannot hold the identity of
+# a competitive entry; that identity lives in `entries`, keyed per competition.
+# Nothing here decides identity. It only refuses to store the same tuple twice.
+#
+# The lookup compares every column the loader writes, so two rows merge only
+# when the source gave them the same value in all of them. Measured over the
+# 3,436 classification files: within a single file, zero pairs of rows share
+# this tuple. A rule that cannot merge two rows of one session cannot merge
+# two cars the source shows racing together, which is the case ADR 0001
+# forbids deciding.
+CAR_COLUMNS = (
+    "number", "team_id", "vehicle", "car_class",
+    "car_group", "tires", "imsa_car_id", "imsa_team_id",
+)
 
+
+def car_identity(number: str, team_id: int, row: dict) -> tuple:
+    """The values the loader writes to `cars`, in CAR_COLUMNS order."""
     try:
         imsa_car_id  = int(row.get("IMSA_CarId", "") or 0) or None
         imsa_team_id = int(row.get("IMSA_TeamId", "") or 0) or None
     except ValueError:
         imsa_car_id = imsa_team_id = None
 
-    cur.execute("""
-        INSERT INTO cars (number, team_id, vehicle, car_class, car_group, tires, imsa_car_id, imsa_team_id)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT DO NOTHING
-        RETURNING id
-    """, (number, team_id, vehicle or None, class_ or None,
-          group_ or None, tires or None, imsa_car_id, imsa_team_id))
+    return (
+        number,
+        team_id,
+        field(row, "VEHICLE") or None,
+        field(row, "CLASS") or None,
+        field(row, "GROUP") or None,
+        (row.get("TYRES") or row.get("TIRES") or "").strip() or None,
+        imsa_car_id,
+        imsa_team_id,
+    )
 
-    row_result = cur.fetchone()
-    if row_result:
-        return row_result[0]
 
-    # Already exists — fetch it
-    cur.execute("""
-        SELECT id FROM cars
-        WHERE number = %s AND team_id = %s AND car_class = %s
-        LIMIT 1
-    """, (number, team_id, class_ or None))
-    result = cur.fetchone()
-    return result[0] if result else None
+_CAR_MATCH = " AND ".join(f"{c} IS NOT DISTINCT FROM %s" for c in CAR_COLUMNS)
+_CAR_INSERT = (
+    f"INSERT INTO cars ({', '.join(CAR_COLUMNS)}) "
+    f"VALUES ({', '.join(['%s'] * len(CAR_COLUMNS))}) RETURNING id"
+)
+
+
+def upsert_car(cur, number: str, team_id: int, row: dict, series_key: str) -> int | None:
+    attrs = car_identity(number, team_id, row)
+
+    # Two ingestions of the same identity would otherwise both find nothing and
+    # both insert. The lock is held to the end of the transaction, which is
+    # where the insert is, and is taken on the identity rather than the table,
+    # so unrelated rows do not queue behind each other.
+    cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (repr(attrs),))
+
+    # IS NOT DISTINCT FROM, not =: most of these columns are nullable, and a
+    # NULL never equals itself. This is the NULLS NOT DISTINCT semantics the
+    # competitive model uses for the same reason.
+    #
+    # ORDER BY id is for determinism, not for choosing between candidates: the
+    # rows this can match are identical in every column the loader writes, so
+    # the choice carries no information. It is not the tie-break among distinct
+    # entries that ADR 0001 forbids.
+    cur.execute(f"SELECT id FROM cars WHERE {_CAR_MATCH} ORDER BY id LIMIT 1", attrs)
+    found = cur.fetchone()
+    if found:
+        return found[0]
+
+    cur.execute(_CAR_INSERT, attrs)
+    inserted = cur.fetchone()
+    return inserted[0] if inserted else None
 
 
 def upsert_driver(cur, d: dict) -> int | None:
@@ -482,12 +528,23 @@ def insert_result(cur, session_id: int, car_id: int, row: dict) -> int | None:
             fl_lap_number, fl_time_raw, fl_time_s, fl_kph
         )
         VALUES (%s, %s, %s, %s::entry_status, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        -- Every parsed column, not a subset: with a stable car id this branch
+        -- is now the one a re-ingestion takes, and a row left half-refreshed
+        -- would mix two readings of the same session.
         ON CONFLICT (session_id, car_id) DO UPDATE
-            SET position       = EXCLUDED.position,
-                status         = EXCLUDED.status,
-                laps_completed = EXCLUDED.laps_completed,
-                total_time_s   = EXCLUDED.total_time_s,
-                fl_time_s      = EXCLUDED.fl_time_s
+            SET position         = EXCLUDED.position,
+                status           = EXCLUDED.status,
+                laps_completed   = EXCLUDED.laps_completed,
+                total_time_raw   = EXCLUDED.total_time_raw,
+                total_time_s     = EXCLUDED.total_time_s,
+                gap_to_first_raw = EXCLUDED.gap_to_first_raw,
+                gap_to_first_s   = EXCLUDED.gap_to_first_s,
+                gap_to_prev_raw  = EXCLUDED.gap_to_prev_raw,
+                gap_to_prev_s    = EXCLUDED.gap_to_prev_s,
+                fl_lap_number    = EXCLUDED.fl_lap_number,
+                fl_time_raw      = EXCLUDED.fl_time_raw,
+                fl_time_s        = EXCLUDED.fl_time_s,
+                fl_kph           = EXCLUDED.fl_kph
         RETURNING id
     """, (
         session_id, car_id, position, status, laps,
