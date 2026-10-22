@@ -70,6 +70,16 @@ jobs:
           # from the development instance, which has the same name and port.
           OPENWEC_TEST_DB_IS_DISPOSABLE: "1"
 
+      - name: Run loader tests
+        run: pytest tests/loader/ -v
+        env:
+          DB_HOST: 127.0.0.1
+          DB_PORT: 5433
+          DB_NAME: openwec
+          DB_USER: openwec
+          DB_PASSWORD: openwec
+          OPENWEC_TEST_DB_IS_DISPOSABLE: "1"
+
       - name: Run SDK tests (no DB needed)
         run: pytest tests/sdk/ -v
 
