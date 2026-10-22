@@ -39,16 +39,40 @@ that several identities answer to. Four of the eight attributes are simply not
 in a lap file — it carries no VEHICLE, TIRES or IMSA identifier — so narrowing
 can confirm which identity a row belongs to but can never reconstruct one.
 
+What counts as a contradiction
+-----------------------------
+Being the only candidate is not proof. Where the source states an attribute
+and the stored row states a different one, the two describe different things
+and the association is refused, not taken because nothing else was on offer.
+
+Three cases stay apart, because they are three different facts:
+
+  absent      the source states nothing — no obstacle to resolving
+  compatible  both state a value and the values agree — resolution allowed
+  conflicting both state a value and the values differ — refused and named
+
+A stored NULL is absence, not disagreement: it blocks nothing, and it proves
+nothing either, so it can never narrow a choice between candidates.
+
+Comparison folds case and punctuation and nothing else; see `comparable`.
+That is also why a spelling cannot break a tie: having declared "Idec Sport"
+and "IDEC Sport" the same rendering of one name, the loader cannot then use
+that same difference to pick between two cars. Measured: 1.058 of the 1.235
+(session, number) pairs with competing identities differ only in team
+spelling, and they are now refused rather than decided by punctuation.
+
 What stays unresolved
 ---------------------
 145 of the 2.732 classification files, all ELMS and WEC: those series' raw/
 tree has no championship level, so two sessions of different championships
 collapse onto one folder name and nothing in the file says which is which.
 
-98 (session, number) pairs whose competing identities agree on team spelling,
-class and group — everything a lap file could state. They are refused.
+1.058 (session, number) pairs whose competing identities differ only in how
+the team name is written, plus those whose identities agree on everything a
+lap file could state. They are refused.
 
-Nothing here falls back. A multiplicity is an outcome, never a quiet choice.
+Nothing here falls back. A multiplicity is an outcome, never a quiet choice,
+and neither is a contradiction.
 """
 from __future__ import annotations
 
@@ -63,6 +87,7 @@ class SessionOutcome(enum.Enum):
     BY_CHAMPIONSHIP = "by_championship"
     NOT_FOUND = "not_found"
     MULTIPLE_CANDIDATES = "multiple_candidates"
+    CONTRADICTED_BY_CHAMPIONSHIP = "contradicted_by_championship"
 
     @property
     def resolved(self) -> bool:
@@ -76,6 +101,7 @@ class CarOutcome(enum.Enum):
     NO_CLASSIFICATION = "no_classification"
     NOT_IN_CLASSIFICATION = "not_in_classification"
     MULTIPLE_IDENTITIES = "multiple_identities"
+    CONTRADICTED_BY_SOURCE = "contradicted_by_source"
 
     @property
     def resolved(self) -> bool:
@@ -129,17 +155,33 @@ def choose_session(
     candidates: list[SessionCandidate],
     championship_raw: str | None = None,
 ) -> tuple[int | None, SessionOutcome]:
+    """
+    Being the only candidate is not proof when the path says otherwise.
+
+    Measured on the corpus: 8 files under 01_IMSA WeatherTech SportsCar
+    Championsh match exactly one session row, and that row belongs to the
+    Pilot Challenge or the Continental Tire Challenge. The WeatherTech row
+    is in the catalogue and was never created in the database, so accepting
+    the sole candidate files WeatherTech data under another championship.
+    """
     if not candidates:
         return None, SessionOutcome.NOT_FOUND
-    if len(candidates) == 1:
-        return candidates[0].session_id, SessionOutcome.SOLE_CANDIDATE
 
     if championship_raw:
-        narrowed = [c for c in candidates
+        matching = [c for c in candidates
                     if in_championship(c.source_url, championship_raw)]
-        if len(narrowed) == 1:
-            return narrowed[0].session_id, SessionOutcome.BY_CHAMPIONSHIP
+        if len(matching) == 1:
+            return matching[0].session_id, SessionOutcome.BY_CHAMPIONSHIP
+        if len(matching) > 1:
+            return None, SessionOutcome.MULTIPLE_CANDIDATES
 
+        # Nothing matched. That is a contradiction only where every candidate
+        # states a championship: one that states none disagrees with nothing.
+        if all(championship_of(c.source_url) is not None for c in candidates):
+            return None, SessionOutcome.CONTRADICTED_BY_CHAMPIONSHIP
+
+    if len(candidates) == 1:
+        return candidates[0].session_id, SessionOutcome.SOLE_CANDIDATE
     return None, SessionOutcome.MULTIPLE_CANDIDATES
 
 
@@ -147,6 +189,38 @@ def _stated(value: str | None) -> str | None:
     """An attribute the source did not state is not an attribute to match on."""
     value = (value or "").strip()
     return value or None
+
+
+def comparable(value: str) -> str:
+    """
+    The form two renderings of one name are compared in.
+
+    Case and punctuation only. Measured over the 3.650 pairs where a lap file
+    and a classification disagree on an attribute: folding case and
+    punctuation reconciles 3.630 of them — "IDEC Sport" against "Idec Sport",
+    the same publisher writing one team two ways — and leaves 20. Folding
+    accents as well reconciles no further pair, so it is not done: an accent
+    is a letter, and dropping it would widen the rule for nothing.
+
+    Nothing else is folded. No team or class alias is built in: two names
+    that differ in their letters stay different names.
+    """
+    return "".join(ch for ch in value.casefold() if ch.isalnum())
+
+
+def _conflicts(stated: str, stored: str | None) -> bool:
+    """
+    A conflict takes two statements. A stored NULL is the absence of one.
+    """
+    return stored is not None and comparable(stated) != comparable(stored)
+
+
+def _confirms(stated: str, stored: str | None) -> bool:
+    """
+    A stored NULL does not disagree, and it does not agree either: it cannot
+    tell two candidates apart, so it never narrows.
+    """
+    return stored is not None and comparable(stated) == comparable(stored)
 
 
 def choose_car(
@@ -164,21 +238,37 @@ def choose_car(
     if not candidates:
         return None, CarOutcome.NOT_IN_CLASSIFICATION
 
-    identities = {c.identity for c in candidates}
-    if len(identities) == 1:
-        return min(c.car_id for c in candidates), CarOutcome.SOLE_IDENTITY
-
     wanted = {
         "team_name": _stated(team_name),
         "car_class": _stated(car_class),
         "car_group": _stated(car_group),
     }
     stated = {k: v for k, v in wanted.items() if v is not None}
+
+    identities = {c.identity for c in candidates}
+    if len(identities) == 1:
+        # Candidates of one identity carry one set of attributes, so any of
+        # them answers for all. Being the only car under this number does not
+        # make it this row's car when the row describes a different one.
+        only = candidates[0]
+        if any(_conflicts(v, getattr(only, k)) for k, v in stated.items()):
+            return None, CarOutcome.CONTRADICTED_BY_SOURCE
+        return min(c.car_id for c in candidates), CarOutcome.SOLE_IDENTITY
+
     if stated:
         narrowed = [c for c in candidates
-                    if all(getattr(c, k) == v for k, v in stated.items())]
-        if narrowed and len({c.identity for c in narrowed}) == 1:
+                    if all(_confirms(v, getattr(c, k)) for k, v in stated.items())]
+        narrowed_identities = {c.identity for c in narrowed}
+        if len(narrowed_identities) == 1:
             return min(c.car_id for c in narrowed), CarOutcome.BY_SOURCE_ATTRIBUTES
+        if not narrowed and all(
+            any(_conflicts(v, getattr(c, k)) for k, v in stated.items())
+            for c in candidates
+        ):
+            # Every candidate states something this row disagrees with. The
+            # row is not one of them, which is not the same as not knowing
+            # which one it is.
+            return None, CarOutcome.CONTRADICTED_BY_SOURCE
 
     return None, CarOutcome.MULTIPLE_IDENTITIES
 

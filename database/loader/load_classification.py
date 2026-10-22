@@ -688,10 +688,13 @@ def process_session(cur, series_key: str, sess: dict, dry_run: bool) -> dict:
         sess.get("championship_raw"),
     )
     if not session_id:
-        # An ambiguous name is not a missing session: the row is there, more
-        # than once, and which one this file belongs to is not established.
+        # Three different facts, kept apart: the row is absent, the row is
+        # there more than once, or the row that is there belongs to another
+        # championship than the folder this file sits in.
         if outcome is SessionOutcome.MULTIPLE_CANDIDATES:
             return {"status": "ambiguous_session"}
+        if outcome is SessionOutcome.CONTRADICTED_BY_CHAMPIONSHIP:
+            return {"status": "contradicted_session"}
         return {"status": "no_session_match"}
 
     if dry_run:
@@ -771,7 +774,7 @@ def run(series_filter: str | None = None, dry_run: bool = False):
     cur  = conn.cursor()
 
     total = {"sessions": 0, "ok": 0, "no_match": 0, "ambiguous": 0,
-             "empty": 0, "errors": 0, "rows": 0}
+             "contradicted": 0, "empty": 0, "errors": 0, "rows": 0}
 
     series_to_run = RAW_DIRS
     if series_filter:
@@ -782,7 +785,8 @@ def run(series_filter: str | None = None, dry_run: bool = False):
         sessions = find_classification_sessions(raw_dir, series_key)
         print(f"  Found {len(sessions)} classification sessions")
 
-        series_stats = {"ok": 0, "no_match": 0, "ambiguous": 0, "empty": 0, "errors": 0}
+        series_stats = {"ok": 0, "no_match": 0, "ambiguous": 0,
+                        "contradicted": 0, "empty": 0, "errors": 0}
 
         for sess in sessions:
             total["sessions"] += 1
@@ -802,6 +806,11 @@ def run(series_filter: str | None = None, dry_run: bool = False):
                     series_stats["ambiguous"] += 1
                     total["ambiguous"] += 1
                     print(f"  [AMBIGUOUS SESSION] {sess['season_raw']} / {sess['event_raw']} / {sess['session_name']}")
+                elif status == "contradicted_session":
+                    series_stats["contradicted"] += 1
+                    total["contradicted"] += 1
+                    print(f"  [CONTRADICTED SESSION] {sess['season_raw']} / {sess['event_raw']} / {sess['session_name']}"
+                          f" — the only session of this name belongs to another championship")
                 elif status == "empty":
                     series_stats["empty"] += 1
                     total["empty"] += 1
@@ -819,6 +828,7 @@ def run(series_filter: str | None = None, dry_run: bool = False):
 
         print(f"  ✓ {series_stats['ok']}  no_match: {series_stats['no_match']}"
               f"  ambiguous: {series_stats['ambiguous']}"
+              f"  contradicted: {series_stats['contradicted']}"
               f"  empty: {series_stats['empty']}  errors: {series_stats['errors']}")
 
     if not dry_run:

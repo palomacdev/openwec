@@ -25,6 +25,7 @@ from row_identity import (  # noqa: E402
     championship_of,
     choose_car,
     choose_session,
+    comparable,
     in_championship,
 )
 
@@ -107,10 +108,14 @@ def test_o_campeonato_do_caminho_desempata():
     assert out.resolved is True
 
 
-def test_campeonato_que_nao_casa_nenhuma_candidata_recusa():
+def test_campeonato_que_nao_casa_nenhuma_candidata_e_contradicao():
+    """
+    Mudou nesta revisao: as duas candidatas declaram campeonato, e nenhuma e
+    o do caminho. Isso nao e nao saber qual — e saber que nao e nenhuma.
+    """
     sid, out = choose_session([MAZDA, PORSCHE], "09_Campeonato Inexistente")
     assert sid is None
-    assert out is SessionOutcome.MULTIPLE_CANDIDATES
+    assert out is SessionOutcome.CONTRADICTED_BY_CHAMPIONSHIP
 
 
 def test_campeonato_que_casa_duas_candidatas_recusa():
@@ -121,10 +126,42 @@ def test_campeonato_que_casa_duas_candidatas_recusa():
     assert out is SessionOutcome.MULTIPLE_CANDIDATES
 
 
-def test_o_campeonato_nao_e_usado_quando_a_candidata_ja_e_unica():
-    """Uma candidata so resolve mesmo que o campeonato nao bata."""
+def test_candidata_unica_contradita_pelo_campeonato_recusa():
+    """
+    Mudou nesta revisao: antes, ser a unica candidata bastava. Medido no
+    corpus, 8 arquivos sob 01_IMSA WeatherTech casam uma unica sessao, e ela
+    e do Pilot Challenge ou do Continental Tire — a linha WeatherTech esta no
+    catalogo e nunca foi criada no banco. Aceitar arquivava dado de um
+    campeonato debaixo de outro.
+    """
     sid, out = choose_session([MAZDA], "99_Outro")
+    assert sid is None
+    assert out is SessionOutcome.CONTRADICTED_BY_CHAMPIONSHIP
+    assert out.resolved is False
+
+
+def test_candidata_unica_com_campeonato_correto_resolve():
+    sid, out = choose_session([MAZDA], "03_IMSA Mazda Prototype Lites")
+    assert (sid, out) == (2695, SessionOutcome.BY_CHAMPIONSHIP)
+
+
+def test_candidata_unica_sem_campeonato_no_caminho_resolve():
+    sid, out = choose_session([MAZDA])
     assert (sid, out) == (2695, SessionOutcome.SOLE_CANDIDATE)
+
+
+def test_candidata_unica_sem_source_url_nao_contradiz_nada():
+    """Quem nao declara campeonato nao discorda de campeonato nenhum."""
+    sem_url = SessionCandidate(999, "201606300845_Practice 1", None)
+    sid, out = choose_session([sem_url], "03_IMSA Mazda Prototype Lites")
+    assert (sid, out) == (999, SessionOutcome.SOLE_CANDIDATE)
+
+
+def test_contradicao_exige_que_todas_declarem_campeonato():
+    sem_url = SessionCandidate(999, "201606301500_Practice 1", None)
+    sid, out = choose_session([MAZDA, sem_url], "99_Outro")
+    assert sid is None
+    assert out is SessionOutcome.MULTIPLE_CANDIDATES
 
 
 def test_a_escolha_da_sessao_e_idempotente():
@@ -208,9 +245,63 @@ def test_a_classe_desempata_quando_a_equipe_coincide():
     assert (cid, out) == (11, CarOutcome.BY_SOURCE_ATTRIBUTES)
 
 
-def test_atributo_que_nao_casa_nenhum_candidato_recusa():
-    """Uma terceira grafia de equipe nao escolhe um carro ao acaso."""
+def test_atributo_que_contradiz_todos_os_candidatos_e_contradicao():
+    """
+    Mudou nesta revisao: uma terceira equipe nao e indecisao entre as duas,
+    e a constatacao de que a linha nao descreve nenhuma delas.
+    """
     cid, out = choose_car(DUAS_IDENTIDADES, team_name="Outra Equipe")
+    assert cid is None
+    assert out is CarOutcome.CONTRADICTED_BY_SOURCE
+
+
+def test_duas_identidades_que_so_diferem_na_grafia_recusam():
+    """
+    A consequencia direta de normalizar: tendo declarado as duas grafias
+    equivalentes, a grafia nao pode mais escolher entre elas. Medido: 1.058
+    dos 1.235 grupos com identidades concorrentes sao deste tipo.
+    """
+    cands = [
+        carro(10, "ident-a", "Dempsey - Proton Racing", "LMGTE", None),
+        carro(11, "ident-b", "DEMPSEY-PROTON RACING", "LMGTE", None),
+    ]
+    cid, out = choose_car(cands, team_name="DEMPSEY-PROTON RACING")
+    assert cid is None
+    assert out is CarOutcome.MULTIPLE_IDENTITIES
+
+
+def test_a_grafia_nao_e_usada_para_desempatar():
+    """A mesma dupla, consultada com a outra grafia, recusa igual."""
+    cands = [
+        carro(10, "ident-a", "Dempsey - Proton Racing", "LMGTE", None),
+        carro(11, "ident-b", "DEMPSEY-PROTON RACING", "LMGTE", None),
+    ]
+    assert choose_car(cands, team_name="Dempsey - Proton Racing")[1] is         CarOutcome.MULTIPLE_IDENTITIES
+
+
+def test_a_classe_ainda_separa_duas_grafias_da_mesma_equipe():
+    """Normalizar a equipe nao apaga os outros atributos."""
+    cands = [
+        carro(10, "ident-a", "Dempsey - Proton Racing", "LMGTE", None),
+        carro(11, "ident-b", "DEMPSEY-PROTON RACING", "LMP2", None),
+    ]
+    cid, out = choose_car(cands, team_name="DEMPSEY-PROTON RACING", car_class="LMP2")
+    assert (cid, out) == (11, CarOutcome.BY_SOURCE_ATTRIBUTES)
+
+
+def test_nulo_no_banco_nunca_desempata():
+    """
+    NULL nao discorda, mas tambem nao comprova: nao pode ser o que elege um
+    candidato entre dois.
+    """
+    cands = [
+        carro(10, "ident-a", None, "LMP2", None),
+        carro(11, "ident-b", "DC RACING", "LMP2", None),
+    ]
+    cid, out = choose_car(cands, team_name="DC RACING")
+    assert (cid, out) == (11, CarOutcome.BY_SOURCE_ATTRIBUTES)
+    # e o candidato NULL nao e eleito por uma equipe que so ele "nao nega"
+    cid, out = choose_car(cands, team_name="Equipe Nenhuma")
     assert cid is None
     assert out is CarOutcome.MULTIPLE_IDENTITIES
 
@@ -241,13 +332,85 @@ def test_atributos_em_branco_nao_impedem_a_tupla_unica():
     assert (cid, out) == (410, CarOutcome.SOLE_IDENTITY)
 
 
-def test_atributos_que_nao_batem_nao_derrubam_a_tupla_unica():
+def test_grafia_divergente_nao_derruba_a_tupla_unica():
     """
-    Havendo uma identidade so, nao ha o que desempatar: o carro e aquele,
-    e uma grafia divergente de equipe nao o transforma noutro.
+    Caixa diferente e a mesma equipe. Medido: 3.630 dos 3.650 pares
+    divergentes do corpus sao deste tipo, cobrindo 100.883 linhas de volta.
     """
     cid, out = choose_car(MESMA_TUPLA, team_name="NIELSEN RACING")
     assert (cid, out) == (410, CarOutcome.SOLE_IDENTITY)
+
+
+def test_equipe_conhecida_e_incompativel_na_tupla_unica_recusa():
+    """
+    Mudou nesta revisao: ser o unico carro do numero nao faz dele o carro
+    desta linha quando a linha descreve outro. `Corvette Racing` contra
+    `Corvette Racing - GM` e um dos 12 casos de TEAM medidos.
+    """
+    cid, out = choose_car(MESMA_TUPLA, team_name="Corvette Racing - GM")
+    assert cid is None
+    assert out is CarOutcome.CONTRADICTED_BY_SOURCE
+    assert out.resolved is False
+
+
+def test_classe_conhecida_e_incompativel_recusa():
+    """`J` contra `G`: dois dos oito casos de CLASS medidos."""
+    cands = [carro(10, "ident-a", "Equipe X", "G", None)]
+    cid, out = choose_car(cands, car_class="J")
+    assert cid is None
+    assert out is CarOutcome.CONTRADICTED_BY_SOURCE
+
+
+def test_classe_nula_no_banco_nao_e_conflito():
+    """
+    Seis dos oito casos de CLASS sao estes: a fonte declara, a classificacao
+    nao tem valor nenhum. Ausencia nao discorda.
+    """
+    cands = [carro(10, "ident-a", "Equipe X", None, None)]
+    cid, out = choose_car(cands, car_class="J")
+    assert (cid, out) == (10, CarOutcome.SOLE_IDENTITY)
+
+
+@pytest.mark.parametrize("declarado,armazenado", [
+    ("IDEC Sport", "Idec Sport"),
+    ("DEMPSEY-PROTON RACING", "Dempsey - Proton Racing"),
+    ("AF  Corse", "AF Corse"),
+    ("United Autosports", "UNITED AUTOSPORTS"),
+])
+def test_diferencas_de_caixa_e_pontuacao_sao_equivalentes(declarado, armazenado):
+    cands = [carro(10, "ident-a", armazenado, "LMP2", None)]
+    cid, out = choose_car(cands, team_name=declarado)
+    assert (cid, out) == (10, CarOutcome.SOLE_IDENTITY)
+
+
+@pytest.mark.parametrize("declarado,armazenado", [
+    ("Corvette Racing", "Corvette Racing - GM"),
+    ("PARKALGAR RACING TEAM", "ARMANDO PARENTE"),
+    ("WTM Racing by Rinaldi", "WTM by Rinaldi Racing"),
+    ("Triple Eight JMR", "Triple Eight"),
+])
+def test_equipes_de_fato_distintas_nao_sao_normalizadas_para_a_mesma(declarado, armazenado):
+    """As quatro formas medidas entre os 12 conflitos reais de TEAM."""
+    assert comparable(declarado) != comparable(armazenado)
+    cands = [carro(10, "ident-a", armazenado, "LMP2", None)]
+    assert choose_car(cands, team_name=declarado)[1] is CarOutcome.CONTRADICTED_BY_SOURCE
+
+
+def test_a_normalizacao_nao_remove_acentos():
+    """
+    Medido: dobrar acentos nao reconcilia nenhum par a mais. Um acento e uma
+    letra, e apaga-lo alargaria a regra a troco de nada.
+    """
+    assert comparable("Levy") != comparable("Lévy")
+    assert comparable("Citroen") != comparable("Citroën")
+    assert comparable("360° Racing") == comparable("360 racing")
+
+
+def test_a_normalizacao_preserva_as_letras():
+    """Conservadora: so caixa e pontuacao saem."""
+    assert comparable("Dempsey - Proton Racing") == "dempseyprotonracing"
+    assert comparable("DC RACING") == "dcracing"
+    assert comparable("GPA RACING") != comparable("DC RACING")
 
 
 def test_o_desempate_exige_todos_os_atributos_declarados():
@@ -256,9 +419,9 @@ def test_o_desempate_exige_todos_os_atributos_declarados():
         carro(11, "ident-b", "Equipe X", "LMP3", "Am"),
     ]
     assert choose_car(cands, team_name="Equipe X", car_group="Am")[0] == 11
-    # classe errada: nenhum candidato satisfaz os tres ao mesmo tempo
+    # classe errada: os dois candidatos a negam, logo e contradicao
     assert choose_car(cands, team_name="Equipe X", car_class="LMGTE",
-                      car_group="Am")[1] is CarOutcome.MULTIPLE_IDENTITIES
+                      car_group="Am")[1] is CarOutcome.CONTRADICTED_BY_SOURCE
 
 
 def test_os_desfechos_resolvidos_sao_so_dois_de_cada_lado():
@@ -266,6 +429,26 @@ def test_os_desfechos_resolvidos_sao_so_dois_de_cada_lado():
         SessionOutcome.SOLE_CANDIDATE, SessionOutcome.BY_CHAMPIONSHIP]
     assert [o for o in CarOutcome if o.resolved] == [
         CarOutcome.SOLE_IDENTITY, CarOutcome.BY_SOURCE_ATTRIBUTES]
+
+
+def test_contradicao_e_desfecho_proprio_nos_dois_lados():
+    """Nem sessao inexistente, nem ambiguidade: um terceiro fato."""
+    for desfecho in (SessionOutcome.CONTRADICTED_BY_CHAMPIONSHIP,
+                     CarOutcome.CONTRADICTED_BY_SOURCE):
+        assert desfecho.resolved is False
+    assert SessionOutcome.CONTRADICTED_BY_CHAMPIONSHIP not in (
+        SessionOutcome.NOT_FOUND, SessionOutcome.MULTIPLE_CANDIDATES)
+    assert CarOutcome.CONTRADICTED_BY_SOURCE not in (
+        CarOutcome.NOT_IN_CLASSIFICATION, CarOutcome.NO_CLASSIFICATION,
+        CarOutcome.MULTIPLE_IDENTITIES)
+
+
+def test_a_contradicao_de_carro_tambem_e_idempotente_e_independe_da_ordem():
+    cands = list(reversed(DUAS_IDENTIDADES))
+    primeiro = choose_car(cands, team_name="Outra Equipe")
+    assert primeiro[1] is CarOutcome.CONTRADICTED_BY_SOURCE
+    for _ in range(5):
+        assert choose_car(DUAS_IDENTIDADES, team_name="Outra Equipe") == primeiro
 
 
 def test_nao_ha_limit_1_sem_order_by_na_resolucao():

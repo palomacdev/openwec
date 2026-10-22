@@ -148,6 +148,38 @@ def test_o_nome_de_pasta_truncado_ainda_resolve(mundo):
     assert (sid, out) == (wt, SessionOutcome.BY_CHAMPIONSHIP)
 
 
+def test_sessao_unica_contradita_pelo_campeonato_recusa(mundo):
+    """
+    As 8 ocorrencias medidas no corpus: a unica sessao com esse nome pertence
+    a outro campeonato, porque a sessao certa nunca foi criada no banco.
+    """
+    mundo.sessao("201701061340_Session 2", "Session 2", "02_Continental Tire")
+    sid, out = mundo.resolve_sessao("Session 2",
+                                    "01_IMSA WeatherTech SportsCar Championsh")
+    assert sid is None
+    assert out is SessionOutcome.CONTRADICTED_BY_CHAMPIONSHIP
+
+
+def test_sessao_unica_com_campeonato_correto_resolve(mundo):
+    esperada = mundo.sessao("201701061500_Session 2", "Session 2",
+                            "01_IMSA WeatherTech SportsCar Championship")
+    assert mundo.resolve_sessao("Session 2",
+                                "01_IMSA WeatherTech SportsCar Championsh") == (
+        esperada, SessionOutcome.BY_CHAMPIONSHIP)
+
+
+def test_sessao_unica_sem_campeonato_no_caminho_resolve(mundo):
+    esperada = mundo.sessao("201701061340_Session 2", "Session 2", "02_Continental Tire")
+    assert mundo.resolve_sessao("Session 2") == (esperada, SessionOutcome.SOLE_CANDIDATE)
+
+
+def test_sessao_unica_sem_source_url_nao_contradiz(mundo):
+    """Quem nao declara campeonato nao discorda de campeonato nenhum."""
+    esperada = mundo.sessao("201701061340_Session 2", "Session 2", None)
+    assert mundo.resolve_sessao("Session 2", "01_IMSA WeatherTech") == (
+        esperada, SessionOutcome.SOLE_CANDIDATE)
+
+
 def test_sessao_sem_source_url_nao_pode_ser_desempatada(mundo):
     mundo.sessao("201606300845_Practice 1", "Practice 1", None)
     mundo.sessao("201606300930_Practice 1", "Practice 1", None)
@@ -260,6 +292,85 @@ def test_numero_literal_distingue_carros(mundo):
     mundo.resultado(sid, zero_tres)
     assert mundo.resolve_carro(sid, "3")[0] == tres
     assert mundo.resolve_carro(sid, "03")[0] == zero_tres
+
+
+def test_equipe_com_diferenca_so_de_caixa_resolve(mundo):
+    sid = mundo.sessao("201606301225_Race", "Race")
+    eq = mundo.equipe("Idec Sport")
+    esperado = mundo.carro("28", eq, "Oreca 07-Gibson", "LMP2")
+    mundo.resultado(sid, esperado)
+    assert mundo.resolve_carro(sid, "28", team_name="IDEC Sport") == (
+        esperado, CarOutcome.SOLE_IDENTITY)
+
+
+def test_equipe_com_diferenca_so_de_pontuacao_resolve(mundo):
+    sid = mundo.sessao("201606301225_Race", "Race")
+    eq = mundo.equipe("Dempsey - Proton Racing")
+    esperado = mundo.carro("77", eq, "Porsche 911 RSR", "LMGTE")
+    mundo.resultado(sid, esperado)
+    assert mundo.resolve_carro(sid, "77", team_name="DEMPSEY-PROTON RACING") == (
+        esperado, CarOutcome.SOLE_IDENTITY)
+
+
+def test_equipe_conhecida_e_incompativel_recusa(mundo):
+    """`Corvette Racing` contra `Corvette Racing - GM`, um dos 12 medidos."""
+    sid = mundo.sessao("201606301225_Race", "Race")
+    eq = mundo.equipe("Corvette Racing - GM")
+    mundo.resultado(sid, mundo.carro("63", eq, "Corvette C8.R", "LMGTE"))
+    cid, out = mundo.resolve_carro(sid, "63", team_name="Corvette Racing")
+    assert cid is None
+    assert out is CarOutcome.CONTRADICTED_BY_SOURCE
+
+
+def test_classe_conhecida_e_incompativel_recusa(mundo):
+    sid = mundo.sessao("201606301225_Race", "Race")
+    eq = mundo.equipe("Equipe")
+    mundo.resultado(sid, mundo.carro("68", eq, "Veiculo", "G"))
+    cid, out = mundo.resolve_carro(sid, "68", car_class="J")
+    assert cid is None
+    assert out is CarOutcome.CONTRADICTED_BY_SOURCE
+
+
+def test_classe_nula_no_banco_e_ausencia_e_nao_conflito(mundo):
+    """Seis dos oito casos de CLASS medidos sao este."""
+    sid = mundo.sessao("201606301225_Race", "Race")
+    eq = mundo.equipe("Equipe")
+    esperado = mundo.carro("32", eq, "Veiculo", None)
+    mundo.resultado(sid, esperado)
+    assert mundo.resolve_carro(sid, "32", car_class="S") == (
+        esperado, CarOutcome.SOLE_IDENTITY)
+
+
+def test_atributo_ausente_na_fonte_nao_impede(mundo):
+    sid = mundo.sessao("201606301225_Race", "Race")
+    eq = mundo.equipe("Equipe")
+    esperado = mundo.carro("32", eq, "Veiculo", "LMP2")
+    mundo.resultado(sid, esperado)
+    assert mundo.resolve_carro(sid, "32", team_name="", car_class=None) == (
+        esperado, CarOutcome.SOLE_IDENTITY)
+
+
+def test_duas_identidades_que_so_diferem_na_grafia_da_equipe_recusam(mundo):
+    """Os 1.058 grupos que a normalizacao deixa de separar."""
+    sid = mundo.sessao("201606301225_Race", "Race")
+    a = mundo.equipe("Dempsey - Proton Racing")
+    b = mundo.equipe("DEMPSEY-PROTON RACING")
+    mundo.resultado(sid, mundo.carro("77", a, "Porsche 911 RSR", "LMGTE"))
+    mundo.resultado(sid, mundo.carro("77", b, "Porsche 911 GT3", "LMGTE"))
+    cid, out = mundo.resolve_carro(sid, "77", team_name="DEMPSEY-PROTON RACING")
+    assert cid is None
+    assert out is CarOutcome.MULTIPLE_IDENTITIES
+
+
+def test_equipes_de_fato_distintas_continuam_separaveis(mundo):
+    sid = mundo.sessao("201606301225_Race", "Race")
+    gpa = mundo.equipe("GPA RACING")
+    dc = mundo.equipe("DC RACING")
+    mundo.resultado(sid, mundo.carro("115", gpa, "Ligier JS P320", "LMP3"))
+    esperado = mundo.carro("115", dc, "Duqueine M30", "LMP3")
+    mundo.resultado(sid, esperado)
+    assert mundo.resolve_carro(sid, "115", team_name="dc racing") == (
+        esperado, CarOutcome.BY_SOURCE_ATTRIBUTES)
 
 
 def test_um_carro_sem_resultado_na_sessao_nao_e_candidato(mundo):

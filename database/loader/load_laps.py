@@ -366,6 +366,8 @@ def process_session(cur, series_key: str, sess: dict, dry_run: bool) -> dict:
     if not session_id:
         if outcome is SessionOutcome.MULTIPLE_CANDIDATES:
             return {"status": "ambiguous_session"}
+        if outcome is SessionOutcome.CONTRADICTED_BY_CHAMPIONSHIP:
+            return {"status": "contradicted_session"}
         return {"status": "no_session_match"}
 
     if dry_run:
@@ -408,12 +410,18 @@ def process_session(cur, series_key: str, sess: dict, dry_run: bool) -> dict:
     if lap_rows:
         execute_values(cur, INSERT_SQL, lap_rows)
 
-    if unresolved[CarOutcome.MULTIPLE_IDENTITIES]:
-        print(f"    [AMBIGUOUS CAR] {unresolved[CarOutcome.MULTIPLE_IDENTITIES]} laps: "
-              f"the number answers to more than one car identity in this session")
-    if unresolved[CarOutcome.NO_CLASSIFICATION]:
-        print(f"    [NO CLASSIFICATION] {unresolved[CarOutcome.NO_CLASSIFICATION]} laps: "
-              f"the session has no classification to resolve a car against")
+    for desfecho, rotulo, porque in (
+        (CarOutcome.MULTIPLE_IDENTITIES, "AMBIGUOUS CAR",
+         "the number answers to more than one car identity in this session"),
+        (CarOutcome.CONTRADICTED_BY_SOURCE, "CONTRADICTED CAR",
+         "the lap row states a team, class or group the classification denies"),
+        (CarOutcome.NO_CLASSIFICATION, "NO CLASSIFICATION",
+         "the session has no classification to resolve a car against"),
+        (CarOutcome.NOT_IN_CLASSIFICATION, "CAR NOT CLASSIFIED",
+         "this number is not in the classification of this session"),
+    ):
+        if unresolved[desfecho]:
+            print(f"    [{rotulo}] {unresolved[desfecho]} laps: {porque}")
 
     return {
         "status":     "ok",
@@ -443,7 +451,7 @@ def run(
 
     total = {
         "sessions": 0, "ok": 0, "no_match": 0, "ambiguous": 0,
-        "empty": 0, "errors": 0, "laps": 0,
+        "contradicted": 0, "empty": 0, "errors": 0, "laps": 0,
     }
 
     series_to_run = RAW_DIRS
@@ -463,7 +471,7 @@ def run(
 
         print(f"  Found {len(sessions)} analysis sessions")
         series_stats = {"ok": 0, "no_match": 0, "ambiguous": 0,
-                        "empty": 0, "errors": 0, "laps": 0}
+                        "contradicted": 0, "empty": 0, "errors": 0, "laps": 0}
 
         for sess in sessions:
             total["sessions"] += 1
@@ -485,6 +493,11 @@ def run(
                     series_stats["ambiguous"] += 1
                     total["ambiguous"] += 1
                     print(f"  [AMBIGUOUS SESSION] {sess['season_raw']}/{sess['event_raw']}/{sess['session_name']}")
+                elif status == "contradicted_session":
+                    series_stats["contradicted"] += 1
+                    total["contradicted"] += 1
+                    print(f"  [CONTRADICTED SESSION] {sess['season_raw']}/{sess['event_raw']}/{sess['session_name']}"
+                          f" — the only session of this name belongs to another championship")
                 elif status == "empty":
                     series_stats["empty"] += 1
                     total["empty"] += 1
@@ -502,6 +515,7 @@ def run(
         print(f"  ✓ {series_stats['ok']}  laps: {series_stats['laps']:,}  "
               f"no_match: {series_stats['no_match']}  "
               f"ambiguous: {series_stats['ambiguous']}  "
+              f"contradicted: {series_stats['contradicted']}  "
               f"errors: {series_stats['errors']}")
 
     if not dry_run:
