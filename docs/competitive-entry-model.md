@@ -1,10 +1,10 @@
 # Competitive entry model
 
-Status: **additive schema, populated in isolation only.** Migrations 006-009
-create the tables and `database/populate_competitions.py` fills them from the
-raw exports. `results`, `laps` and the analytics tables still reference `cars`
-exactly as before, and nothing in the API or the dashboard reads any of this
-yet.
+Status: **additive schema, populated in isolation only.** Migrations 006-010
+create the tables. `database/populate_competitions.py` fills those of 006-009
+from the raw exports; the two added by 010 are created empty and stay empty.
+`results`, `laps` and the analytics tables still reference `cars` exactly as
+before, and nothing in the API or the dashboard reads any of this yet.
 
 The population has only ever been run against a disposable database. The
 script refuses to start otherwise.
@@ -146,85 +146,36 @@ is merged on a guess.
 
 ---
 
-## Migration strategy
-
-Phases 1–4 are additive and reversible. Nothing after this PR is implemented.
-
-```
-F1  create competitions and entries                    ← THIS PR
-F2  populate competitions per event
-F3  populate entries, setting identity_status
-F4  export the ambiguous groups for review             ← STOP for human decision
-F5  add entry_id (nullable) to results, laps, analytics_*
-F6  backfill entry_id; canonical row chosen by its links
-      order: has laps > has analytics > has results > created_at
-      never MIN(id)
-F7  verify zero orphans and zero null entry_id
-F8  NOT NULL + FK + indexes
-F9  point API queries at entry_id
-F10 retire cars.team_id only after F9 is stable
-```
-
-The canonical-row rule matters: `load_laps.py:205` resolves a car with
-`LIMIT 1` and no `ORDER BY`, so laps attach to exactly one of the duplicate
-rows. The duplicate with no laps is not the one to keep.
-
----
-
 ## During the transition
 
-The loader duplicates on every run and this PR does not change that. Repairing
-idempotency means choosing an identity rule, and every candidate rule either
-merges entries the source proves are different or splits entries it only spells
-differently — a decision that does not belong in an additive change.
+The loader duplicates classification rows on every run, and nothing here
+changes that. Repairing idempotency means choosing an identity rule, and every
+candidate rule either merges entries the source proves are different or splits
+entries it only spells differently.
 
-So writes are blocked:
+So writes are blocked by default: `load_classification.py` refuses with a
+non-zero exit unless `OPENWEC_ALLOW_DUPLICATING_LOADER` is set, and `--dry-run`
+is unaffected. The block is a decision, not an obstacle.
 
-```
-$ python -m database.loader.load_classification --series WEC
-BLOCKED - this loader duplicates classification data on every run.
-  Use --dry-run to inspect without writing, or set
-  OPENWEC_ALLOW_DUPLICATING_LOADER=1 to override and accept the duplication.
-$ echo $?
-2
-```
-
-`--dry-run` is unaffected. The override exists so the block is a decision, not
-an obstacle.
-
-**This PR does not fix the duplication already in production.** It prepares the
-identity that will, and stops the bleeding by refusing to add more.
+The duplication already present in the legacy tables is **not** fixed by this
+model. `DATA_POLICY.md` documents it and how to read around it. One consequence
+belongs here, because it decides which duplicate matters: `get_car_id()` in
+`load_laps.py` resolves a car with `LIMIT 1` and no `ORDER BY`, so laps attach
+to exactly one of the duplicate rows. The duplicate with no laps is not the one
+to keep.
 
 ---
 
 ## Reviewing the ambiguous groups
 
-```
-python scripts/export_ambiguous_entries.py --out ambiguous_entries.csv
-```
+Groups that cannot be decided from the data are exported with the spellings,
+vehicles, source ids, drivers and sessions behind them, plus empty `decision`
+and `decided_by` columns, by `scripts/export_ambiguous_entries.py`. It never
+guesses: driver overlap is reported as evidence and nothing more.
 
-Writes one row per team per unresolved group, with the spellings, vehicles,
-source ids, drivers and sessions behind it, plus empty `decision` and
-`decided_by` columns. It never guesses: driver overlap is reported as evidence
-and nothing more.
-
-```
-conflicting groups       : 160
-  resolved by source id  : 5
-  needing human review   : 155
-```
-
-Each group carries a `group_id`: `sha256(series | season | event | number |
-class)` truncated to 16 hex characters. It depends on the natural key alone, so
-it survives re-export, database rebuilds and id renumbering — which is what
-makes a decision file replayable:
-
-```
-python scripts/export_ambiguous_entries.py --out new.csv --decisions reviewed.csv
-```
-
-Decisions already recorded against a `group_id` are carried into the new export,
-so review is incremental rather than all-or-nothing.
+Each group carries an id derived from its natural key alone, so it survives
+re-export, database rebuilds and id renumbering — which is what lets a decision
+file be replayed against a later export instead of being redone.
 
 ### Behaviour of the three regimes
 
@@ -303,53 +254,20 @@ competition, because `{FP1} ⊆ {FP1, FP2, Race}`.
 Class and number agreement alone never confirms a competition: they say the
 fields look alike, not that they are the same field.
 
-### What the population produced
-
-Measured over the whole raw tree, in a disposable database:
-
-```
-eventos                      431      sessoes                     3240
-competicoes resolved         426      competicoes provisional      165
-associacoes resolved        2855      inferred                     403
-associacoes unresolved       291      sessoes com >1 competicao    285
-inscricoes determinadas    18008      indeterminadas               161
-hipoteses de fusao pendentes  77      aplicadas automaticamente      0
-```
-
-Reconciliation closes exactly:
-
-```
-17201 identidades (evento, numero, classe)
-+ 829 presentes em mais de uma competicao do mesmo evento   (32 eventos)
-+ 139 do regime sem classe, chaveado por (numero, equipe)   (21 eventos)
-= 18169 = 18008 determinadas + 161 indeterminadas
-```
-
-### The 77 merge hypotheses
+### Merge hypotheses, none applied
 
 One identifier group confined to another's sessions, fielding no class of its
 own, is what an entry list with absentees looks like — and also what a second
-championship confined to shared sessions looks like. None is applied.
+championship confined to shared sessions looks like. The model cannot tell them
+apart, so it does not try: **no automatic identity decision is authorised**, and
+none has been taken.
 
-```
-python scripts/export_merge_hypotheses.py --out merge_hypotheses.csv
-```
-
-| Priority | Independent corroboration | n |
-|---|---|---:|
-| A | the same entry in both groups under different identifiers | 1 |
-| B | no shared number, teams of the smaller contained in the larger | 20 |
-| C | no shared number, teams partly in common | 24 |
-| D | a number shared by **different** teams — tells against | 0 |
-| E | nothing but the subset heuristic | 32 |
-
-A-E is a priority of investigation, never a verdict. Decisions are carried
-between exports by `hypothesis_id` while `evidence_digest` is unchanged; a
-decision recorded against different evidence comes back marked stale rather
-than being reapplied.
-
-Leaving them unapplied costs 173 session associations: with them, unresolved
-sessions fall from 291 to 118. The entry counts barely move.
+The candidates are exported with their evidence by
+`scripts/export_merge_hypotheses.py`, which grades them as a priority of
+investigation rather than a verdict, and carries recorded decisions forward only
+while the evidence behind them is unchanged. Until a person decides, the groups
+stay apart and some sessions stay unassociated, which is part of why some rows
+below carry no association.
 
 ### No identifier distance, anywhere
 
@@ -369,16 +287,10 @@ is where the question starts, not where it ends. The source can move an
 identifier from one list to another, and a bare intersection cannot tell that
 apart from a list that simply grew or shrank.
 
-This was a real defect, found by testing before anything was committed. A
-competition carrying one reassigned identifier inherited the `identity_uid` of
-another, although its sessions and entry population were entirely different —
-a silent merge and a silent identity loss in the same operation:
-
-```
-A: ids={900,901} sessions={S1} population=#1 ALPHA, #2 BETA
-B: ids={900,902} sessions={S9} population=#9 OMEGA, #8 SIGMA
-   -> B silently became A
-```
+A competition carrying one reassigned identifier could otherwise inherit the
+`identity_uid` of another while its sessions and entry population were
+entirely different — a silent merge and a silent identity loss in the same
+operation.
 
 Five things are now weighed separately, and the identifier intersection is only
 the first of them:
@@ -487,6 +399,15 @@ such query can exist.
 
 ### Measured coverage
 
+Scope of this measurement: 431 events, 3,240 sessions and 115,694
+classification rows, read from `raw/` against a database populated from those
+same exports for this analysis — not the development database and not
+production. Produced by `scripts/report_entry_coverage.py`, which is in this
+repository and re-runnable. The report carries no timestamp, so no date is
+claimed for it; the figures describe the corpus as the raw exports stood when
+it ran, and a later population, against a `raw/` the source has since revised,
+need not reproduce them exactly.
+
 ```
 linhas de classificacao            : 115694
   resolved_by_source_id              60873   52.6%
@@ -498,11 +419,13 @@ linhas de classificacao            : 115694
   no_association                     15561   13.5%
 
   RESOLVIDAS                         99935   86.4%
+  PENDENTES                          15759   13.6%
 ```
 
-The 15,561 unassociated rows are the sessions still waiting on the 77 pending
-merge hypotheses, dominated by the hourly snapshots at Le Mans. None of those
-hypotheses is applied here.
+The 15,561 unassociated rows are sessions whose competition is not settled,
+dominated by the hourly snapshots at Le Mans. They are not a failure of the
+resolver: the model declines to place a row whose session belongs to no
+competition it can prove.
 
 ### One identifier, several entries
 
@@ -546,9 +469,8 @@ case examined the copies describe *different entries* sharing one key, not one
 entry recorded twice with different outcomes.
 
 A note on counting them: `count(DISTINCT x)` returns 0 when every value is
-NULL, so a test for disagreement must be `> 1`. Written as `= 1` it silently
-drops the all-NULL groups, which is how an earlier count of these came out
-wrong.
+NULL, so a test for disagreement must be `> 1`, not `= 1`. Written as `= 1` it
+silently drops the all-NULL groups.
 
 ---
 
