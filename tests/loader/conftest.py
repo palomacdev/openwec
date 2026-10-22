@@ -6,6 +6,8 @@ does not let a conftest be imported by name, and the guard has to be testable.
 """
 from __future__ import annotations
 
+import uuid
+
 import pytest
 
 from tests.loader.sandbox import (  # noqa: F401
@@ -17,6 +19,7 @@ from tests.loader.sandbox import (  # noqa: F401
     historical_counts,
     refusal,
 )
+
 
 @pytest.fixture(scope="module")
 def sandbox():

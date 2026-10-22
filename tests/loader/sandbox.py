@@ -21,7 +21,6 @@ the end. There is no delete to get wrong, because there is nothing to keep.
 from __future__ import annotations
 
 import os
-import uuid
 from pathlib import Path
 
 import pytest
