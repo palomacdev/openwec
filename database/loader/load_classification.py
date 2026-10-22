@@ -54,6 +54,78 @@ VALID_STATUSES = {
 }
 
 
+# ── Header dialects ──────────────────────────────────────────
+#
+# The source publishes classification in two header dialects, and the split
+# follows the kind of session rather than the series. Measured over the 3,436
+# classification files of the raw tree:
+#
+#   dialect  files   sessions         columns it uses
+#   -------  -----   --------------   -----------------------------------
+#   A         1172   almost all race  POSITION  LAPS  TOTAL_TIME  STATUS
+#                                     FL_TIME  FL_LAPNUM  FL_KPH
+#   B         2352   almost none      POS       LAPS  TIME        LAP  KPH
+#
+# The pairing is not mechanical, and one case matters more than the others:
+# in dialect B, TIME is the best lap of the session, next to the LAP it was
+# set on and the KPH it was set at. It is NOT an elapsed total. Mapping it to
+# total_time_s would record a lap time as a race duration, so TIME maps to
+# fl_time_s, LAP to fl_lap_number and KPH to fl_kph.
+#
+# TOTAL_TIME and STATUS have no counterpart in dialect B. They are absent at
+# the source, not lost in transit, and they stay empty here.
+HEADER_ALIASES = {
+    "POSITION":  ("POSITION", "POS"),
+    "FL_TIME":   ("FL_TIME", "TIME"),
+    "FL_LAPNUM": ("FL_LAPNUM", "LAP"),
+    "FL_KPH":    ("FL_KPH", "KPH"),
+}
+
+
+def field(row: dict, name: str) -> str:
+    """
+    The value of `name` in whichever spelling this file uses.
+
+    A spelling that is present in the file wins even when its value is empty,
+    so an empty TOTAL_TIME in a dialect-A file never falls through to a TIME
+    column that means something else. Only a column that is absent altogether
+    lets the next spelling be tried.
+    """
+    for key in HEADER_ALIASES.get(name, (name,)):
+        if key in row:
+            value = row.get(key)
+            return value.strip() if value else ""
+    return ""
+
+
+def as_int(value: str) -> int | None:
+    """
+    None only when the source gave nothing, or gave something unreadable.
+
+    Zero is a value the source does mean: a car classified 35th with LAPS=0
+    completed no laps, which is not the same as not knowing how many it
+    completed. 3,014 classification rows say LAPS=0 and 4,170 say FL_LAPNUM=0.
+    """
+    value = (value or "").strip()
+    if not value:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def as_float(value: str) -> float | None:
+    """Float counterpart of as_int, with the same treatment of zero."""
+    value = (value or "").strip()
+    if not value:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
 # ── Time parsers ─────────────────────────────────────────────
 
 def parse_race_time(s: str) -> float | None:
@@ -387,32 +459,19 @@ def upsert_driver(cur, d: dict) -> int | None:
 
 
 def insert_result(cur, session_id: int, car_id: int, row: dict) -> int | None:
-    try:
-        position = int(row.get("POSITION", "") or 0) or None
-    except ValueError:
-        position = None
+    position = as_int(field(row, "POSITION"))
+    laps     = as_int(field(row, "LAPS"))
+    fl_lap   = as_int(field(row, "FL_LAPNUM"))
+    fl_kph   = as_float(field(row, "FL_KPH"))
 
-    try:
-        laps = int(row.get("LAPS", "") or 0) or None
-    except ValueError:
-        laps = None
+    # No alias: dialect B carries neither, so these stay empty rather than
+    # borrowing a column that means something else.
+    total_raw = field(row, "TOTAL_TIME")
+    status    = normalize_status(field(row, "STATUS"))
 
-    try:
-        fl_lap = int(row.get("FL_LAPNUM", "") or 0) or None
-    except ValueError:
-        fl_lap = None
-
-    try:
-        fl_kph = float(row.get("FL_KPH", "") or 0) or None
-    except ValueError:
-        fl_kph = None
-
-    total_raw = row.get("TOTAL_TIME", "").strip()
-    gap1_raw  = row.get("GAP_FIRST", "").strip()
-    gapp_raw  = row.get("GAP_PREVIOUS", "").strip()
-    fl_raw    = row.get("FL_TIME", "").strip()
-
-    status = normalize_status(row.get("STATUS", ""))
+    gap1_raw = field(row, "GAP_FIRST")
+    gapp_raw = field(row, "GAP_PREVIOUS")
+    fl_raw   = field(row, "FL_TIME")
 
     cur.execute("""
         INSERT INTO results (
