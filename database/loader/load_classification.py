@@ -32,9 +32,13 @@ import csv
 import io
 import os
 import re
+import sys
 import psycopg2
 from pathlib import Path
 from database.db import DB_CONFIG
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from row_identity import SessionOutcome, resolve_session_id  # noqa: E402
 
 
 # ── Config ───────────────────────────────────────────────────
@@ -392,20 +396,22 @@ def get_final_classification(classification_dir: Path) -> Path | None:
 
 # ── DB helpers ────────────────────────────────────────────────
 
-def get_session_id(cur, series_key: str, season_raw: str, event_raw: str, session_name: str) -> int | None:
-    cur.execute("""
-        SELECT s.id FROM sessions s
-        JOIN events e   ON e.id = s.event_id
-        JOIN seasons se ON se.id = e.season_id
-        JOIN series sr  ON sr.id = se.series_id
-        WHERE sr.key::text = %s
-          AND se.raw_id = %s
-          AND e.raw_id  = %s
-          AND s.name    = %s
-        LIMIT 1
-    """, (series_key, season_raw, event_raw, session_name))
-    row = cur.fetchone()
-    return row[0] if row else None
+def get_session_id(
+    cur,
+    series_key: str,
+    season_raw: str,
+    event_raw: str,
+    session_name: str,
+    championship_raw: str | None = None,
+) -> tuple[int | None, SessionOutcome]:
+    """
+    Which session row this folder is. See row_identity for what counts as
+    proof; a name that several sessions answer to resolves to nothing.
+    """
+    return resolve_session_id(cur, series_key, season_raw, event_raw,
+                              session_name, championship_raw)
+
+
 
 
 def upsert_team(cur, name: str) -> int:
@@ -606,7 +612,8 @@ def find_classification_sessions(raw_dir: Path, series_key: str) -> list[dict]:
     # raw/imsa/{season}/{event}/{championship}/{session}/classification/
     is_imsa = (series_key == "IMSA")
 
-    def collect(season_raw: str, event_raw: str, session_dir: Path) -> None:
+    def collect(season_raw: str, event_raw: str, session_dir: Path,
+                championship_raw: str | None = None) -> None:
         class_dir = session_dir / "classification"
         if not class_dir.exists():
             class_dir = session_dir / "other"
@@ -614,10 +621,13 @@ def find_classification_sessions(raw_dir: Path, series_key: str) -> list[dict]:
         csv = get_final_classification(class_dir)
         if csv:
             sessions.append({
-                "season_raw":   season_raw,
-                "event_raw":    event_raw,
-                "session_name": session_dir.name,
-                "csv_path":     csv,
+                "season_raw":       season_raw,
+                "event_raw":        event_raw,
+                "session_name":     session_dir.name,
+                # Only IMSA's raw/ tree keeps the championship folder, and it
+                # is what separates sessions the catalogue gave the same name.
+                "championship_raw": championship_raw,
+                "csv_path":         csv,
             })
             return
 
@@ -648,7 +658,7 @@ def find_classification_sessions(raw_dir: Path, series_key: str) -> list[dict]:
                     for session_dir in sorted(champ_dir.iterdir()):
                         if not session_dir.is_dir():
                             continue
-                        collect(season_raw, event_raw, session_dir)
+                        collect(season_raw, event_raw, session_dir, champ_dir.name)
             else:
                 for session_dir in sorted(event_dir.iterdir()):
                     if not session_dir.is_dir():
@@ -673,8 +683,15 @@ def process_session(cur, series_key: str, sess: dict, dry_run: bool) -> dict:
     if not rows:
         return {"status": "empty"}
 
-    session_id = get_session_id(cur, series_key, season_raw, event_raw, session_name)
+    session_id, outcome = get_session_id(
+        cur, series_key, season_raw, event_raw, session_name,
+        sess.get("championship_raw"),
+    )
     if not session_id:
+        # An ambiguous name is not a missing session: the row is there, more
+        # than once, and which one this file belongs to is not established.
+        if outcome is SessionOutcome.MULTIPLE_CANDIDATES:
+            return {"status": "ambiguous_session"}
         return {"status": "no_session_match"}
 
     if dry_run:
@@ -753,7 +770,8 @@ def run(series_filter: str | None = None, dry_run: bool = False):
     conn = psycopg2.connect(**DB_CONFIG)
     cur  = conn.cursor()
 
-    total = {"sessions": 0, "ok": 0, "no_match": 0, "empty": 0, "errors": 0, "rows": 0}
+    total = {"sessions": 0, "ok": 0, "no_match": 0, "ambiguous": 0,
+             "empty": 0, "errors": 0, "rows": 0}
 
     series_to_run = RAW_DIRS
     if series_filter:
@@ -764,7 +782,7 @@ def run(series_filter: str | None = None, dry_run: bool = False):
         sessions = find_classification_sessions(raw_dir, series_key)
         print(f"  Found {len(sessions)} classification sessions")
 
-        series_stats = {"ok": 0, "no_match": 0, "empty": 0, "errors": 0}
+        series_stats = {"ok": 0, "no_match": 0, "ambiguous": 0, "empty": 0, "errors": 0}
 
         for sess in sessions:
             total["sessions"] += 1
@@ -780,6 +798,10 @@ def run(series_filter: str | None = None, dry_run: bool = False):
                     series_stats["no_match"] += 1
                     total["no_match"] += 1
                     print(f"  [NO MATCH] {sess['season_raw']} / {sess['event_raw']} / {sess['session_name']}")
+                elif status == "ambiguous_session":
+                    series_stats["ambiguous"] += 1
+                    total["ambiguous"] += 1
+                    print(f"  [AMBIGUOUS SESSION] {sess['season_raw']} / {sess['event_raw']} / {sess['session_name']}")
                 elif status == "empty":
                     series_stats["empty"] += 1
                     total["empty"] += 1
@@ -795,7 +817,9 @@ def run(series_filter: str | None = None, dry_run: bool = False):
                 print(f"  [ERROR] {sess['season_raw']}/{sess['event_raw']}/{sess['session_name']}: {e}")
                 import traceback; traceback.print_exc()
 
-        print(f"  ✓ {series_stats['ok']}  no_match: {series_stats['no_match']}  empty: {series_stats['empty']}  errors: {series_stats['errors']}")
+        print(f"  ✓ {series_stats['ok']}  no_match: {series_stats['no_match']}"
+              f"  ambiguous: {series_stats['ambiguous']}"
+              f"  empty: {series_stats['empty']}  errors: {series_stats['errors']}")
 
     if not dry_run:
         conn.commit()

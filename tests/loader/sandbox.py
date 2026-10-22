@@ -44,7 +44,13 @@ FIXTURE_CEILING = {"results": 1_000, "laps": 1_000, "cars": 1_000}
 # defaults, checks and indexes, so the sandbox follows the real schema instead
 # of restating it; foreign keys are deliberately not copied, which is what
 # keeps a sandbox row from referring to a public one.
-SANDBOX_TABLES = ("teams", "sessions", "cars", "results")
+#
+# series, seasons and events are here to be READ, not written by the loader:
+# resolving a session joins all three, and a table missing from the sandbox
+# would resolve through search_path to the one in public — that is, the
+# suite would read the real corpus.
+SANDBOX_TABLES = ("series", "seasons", "events", "teams", "sessions",
+                  "cars", "results")
 
 
 def declared_disposable() -> bool:
