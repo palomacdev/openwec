@@ -321,6 +321,26 @@ def read_csv(path: Path) -> list[dict]:
 
 # ── Final hour finder ─────────────────────────────────────────
 
+# A classification/ or other/ folder holds exactly four kinds of CSV, and only
+# two of them have one row per car:
+#
+#   03_Classification_*  03_Results*   one row per car — classification
+#   23_Analysis_*                      one row per LAP
+#   26_Weather*                        one row per weather reading
+#
+# Anything outside the first family is not a classification, however alone it
+# is in its folder: a session with no 03_ file has no published classification,
+# and reading its lap log instead turns every lap into a car.
+#
+# The lookahead is not \b: the separator after the word is usually "_", itself
+# a word character, and \b would reject 03_Classification_Race.CSV.
+CLASSIFICATION_FILE = re.compile(r"^03_(classification|results)(?![a-z0-9])", re.IGNORECASE)
+
+
+def is_classification_file(path: Path) -> bool:
+    return path.suffix.lower() == ".csv" and bool(CLASSIFICATION_FILE.match(path.name))
+
+
 def get_final_classification(classification_dir: Path) -> Path | None:
     """
     Finds the final classification CSV in a classification/ folder.
@@ -328,24 +348,23 @@ def get_final_classification(classification_dir: Path) -> Path | None:
       - Direct CSV in folder (no sub-folders)
       - Hourly sub-folders: "Hour 6/", "24_Hour 24/"
     Returns path to the final (highest hour) CSV, or None.
+
+    A folder that holds no classification file yields None. There is no
+    fallback to another kind of CSV.
     """
     if not classification_dir.exists():
         return None
 
-    # Direct CSVs (no sub-folders)
-    direct = sorted(classification_dir.glob("*.CSV"))
-    if not direct:
-        direct = sorted(classification_dir.glob("*.csv"))
+    # rglob covers both shapes: the files sitting directly in the folder and
+    # the hourly sub-folders. The suffix is matched case-insensitively so the
+    # same files are seen on Windows and on the case-sensitive CI runner.
+    all_csvs = sorted(
+        p for p in classification_dir.rglob("*")
+        if p.is_file() and is_classification_file(p)
+    )
 
-    # Sub-folder CSVs (hourly snapshots)
-    sub_csvs = list(classification_dir.rglob("*.CSV"))
-    if not sub_csvs:
-        sub_csvs = list(classification_dir.rglob("*.csv"))
-
-    if not sub_csvs and not direct:
+    if not all_csvs:
         return None
-
-    all_csvs = sub_csvs or direct
 
     # If only one, return it
     if len(all_csvs) == 1:
@@ -573,8 +592,12 @@ def find_classification_sessions(raw_dir: Path, series_key: str) -> list[dict]:
     Walks raw/ directory and returns list of:
       {season_raw, event_raw, session_name, csv_path}
     Only returns the final hour CSV per session.
+
+    A session whose folder holds CSVs but no classification among them is
+    reported and left out, rather than loaded from whatever else is there.
     """
     sessions = []
+    skipped = []
 
     if not raw_dir.exists():
         return sessions
@@ -582,6 +605,30 @@ def find_classification_sessions(raw_dir: Path, series_key: str) -> list[dict]:
     # IMSA has extra championship level:
     # raw/imsa/{season}/{event}/{championship}/{session}/classification/
     is_imsa = (series_key == "IMSA")
+
+    def collect(season_raw: str, event_raw: str, session_dir: Path) -> None:
+        class_dir = session_dir / "classification"
+        if not class_dir.exists():
+            class_dir = session_dir / "other"
+
+        csv = get_final_classification(class_dir)
+        if csv:
+            sessions.append({
+                "season_raw":   season_raw,
+                "event_raw":    event_raw,
+                "session_name": session_dir.name,
+                "csv_path":     csv,
+            })
+            return
+
+        # Silent only when there was nothing to read at all. A folder that
+        # holds CSVs but none of them a classification is the case worth
+        # seeing: that is where the lap logs used to be picked up.
+        if class_dir.exists() and any(
+            p.is_file() and p.suffix.lower() == ".csv" for p in class_dir.rglob("*")
+        ):
+            skipped.append((season_raw, event_raw, session_dir.name))
+            print(f"  [NO CLASSIFICATION] {season_raw} / {event_raw} / {session_dir.name}")
 
     for season_dir in sorted(raw_dir.iterdir()):
         if not season_dir.is_dir():
@@ -601,38 +648,15 @@ def find_classification_sessions(raw_dir: Path, series_key: str) -> list[dict]:
                     for session_dir in sorted(champ_dir.iterdir()):
                         if not session_dir.is_dir():
                             continue
-                        session_name = session_dir.name
-                        # class_dir = session_dir / "classification"
-                        # csv = get_final_classification(class_dir)
-                        class_dir = session_dir / "classification"
-                        if not class_dir.exists():
-                            class_dir = session_dir / "other"
-                        csv = get_final_classification(class_dir)
-                        if csv:
-                            sessions.append({
-                                "season_raw":   season_raw,
-                                "event_raw":    event_raw,
-                                "session_name": session_name,
-                                "csv_path":     csv,
-                            })
+                        collect(season_raw, event_raw, session_dir)
             else:
                 for session_dir in sorted(event_dir.iterdir()):
                     if not session_dir.is_dir():
                         continue
-                    session_name = session_dir.name
-                    # class_dir = session_dir / "classification"
-                    # csv = get_final_classification(class_dir)
-                    class_dir = session_dir / "classification"
-                    if not class_dir.exists():
-                        class_dir = session_dir / "other"
-                    csv = get_final_classification(class_dir)
-                    if csv:
-                        sessions.append({
-                            "season_raw":   season_raw,
-                            "event_raw":    event_raw,
-                            "session_name": session_name,
-                            "csv_path":     csv,
-                        })
+                    collect(season_raw, event_raw, session_dir)
+
+    if skipped:
+        print(f"  {len(skipped)} sessions have CSVs but no published classification")
 
     return sessions
 
