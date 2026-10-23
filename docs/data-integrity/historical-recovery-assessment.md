@@ -250,6 +250,32 @@ numa legítima. Consequência direta para o plano: **os `cars` contaminados não
 podem ser identificados pela tupla**, só pela linha de `results` nas 52
 sessões.
 
+### 4.0 Quem referencia os `cars` legítimos
+
+| | |
+|---|---:|
+| `cars` legítimos | 346.633 |
+| referenciados por `results` | **346.633** (todos) |
+| referenciados por `laps` | **56.793** |
+| sem nenhuma referência | **0** |
+
+Cada `cars` legítimo tem exatamente uma linha de `results` — é a relação que
+a duplicação criou: uma execução do carregador, um carro novo, um resultado
+novo. Nenhum carro órfão existe, o que significa que **a consolidação de
+`cars` obriga a consolidar `results` junto**; não há linha solta a descartar
+sem consequência.
+
+Os 56.793 citados por `laps` são a interseção que a Fase 3 do plano precisa
+reconciliar antes de qualquer merge.
+
+> **Nota de método — duas formulações, mesmo resultado.** Esta seção foi
+> medida duas vezes por formulações diferentes: a varredura única com
+> `EXISTS` publicada acima, e uma versão com `NOT IN` contra 324.720 linhas
+> em oito subconsultas, que levou mais de 10 minutos. As duas devolvem os
+> mesmos seis valores — 346.633, 4.128, 4.078, 342.505, 50 e 1.749 — o que
+> é uma conferência independente do §4. A versão cara foi descartada por
+> custo, não por discordância, e os dois números desta subseção vieram dela.
+
 ### 4.1 Duplicatas comprovadas pelos oito atributos
 
 Chave lógica (sessão, tupla das oito colunas que `upsert_car` grava), apenas
