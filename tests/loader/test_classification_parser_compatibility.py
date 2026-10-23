@@ -36,7 +36,10 @@ from load_classification import (  # noqa: E402
     as_float,
     as_int,
     car_identity,
+    driver_column_shape,
+    extract_drivers,
     extract_drivers_imsa,
+    extract_drivers_wec,
     field,
     insert_result,
     normalize_status,
@@ -411,3 +414,44 @@ def test_parse_gap(texto, segundos):
 ])
 def test_normalize_status(texto, estado):
     assert normalize_status(texto) == estado
+
+
+# ── Which extractor runs, decided by the row ─────────────────
+
+LINHA_WEC = {"NUMBER": "4", "DRIVER_1": "Antonio FUOCO", "DRIVER_2": "",
+             "DRIVER_3": "", "DRIVER_4": "", "DRIVER_5": ""}
+
+
+def test_a_forma_das_colunas_decide_o_extrator():
+    """
+    PR #52 measured the gap and left it; this is where it closes.
+
+    Choosing by series called the WEC extractor for these Le Mans Cup files
+    and dropped every driver in silence — the car and the result loaded, the
+    names did not. The row is asked instead.
+    """
+    assert driver_column_shape(PR["3"]) == "imsa"
+    assert driver_column_shape(LINHA_WEC) == "wec"
+    assert driver_column_shape({"NUMBER": "4"}) is None
+
+
+def test_os_pilotos_da_le_mans_cup_chegam_pelo_extrator_certo():
+    assert [(d["slot"], d["first_name"], d["last_name"])
+            for d in extract_drivers(PR["3"], "LEMANSCUP")] == [
+        (1, "Léonard", "HOOGENBOOM"),
+        (2, "Jens", "PETERSEN"),
+    ]
+    assert extract_drivers_wec(PR["3"]) == []     # the shape it cannot read
+
+
+def test_o_formato_wec_continua_lido_como_antes():
+    assert [(d["slot"], d["first_name"], d["last_name"])
+            for d in extract_drivers(LINHA_WEC, "LEMANSCUP")] == [
+        (1, "Antonio", "FUOCO"),
+    ]
+
+
+def test_sem_coluna_de_piloto_a_serie_e_o_criterio_restante():
+    """Neither shape is present, so there is nothing to read either way."""
+    assert extract_drivers({"NUMBER": "4"}, "IMSA") == []
+    assert extract_drivers({"NUMBER": "4"}, "WEC") == []
