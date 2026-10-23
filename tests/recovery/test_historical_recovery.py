@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import io
 import sys
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -35,9 +36,17 @@ from database.recovery.historical_recovery import (  # noqa: E402
     source_evidence,
 )
 
+from database.recovery.backup_attestation import ESSENTIAL_TABLES  # noqa: E402
+
 from tests.recovery.test_recovery_guard import CursorFalso  # noqa: E402
+from tests.recovery.test_backup_attestation import (  # noqa: E402
+    AGORA,
+    CONTAGENS,
+    atestado as com_evidencia,
+)
 
 CLUSTER = "7699952836394844194"
+CLUSTER_ORIGEM = "7642299396037144610"
 
 
 # ── One session, and no way to name another ──────────────────
@@ -97,13 +106,66 @@ def test_backup_que_nao_e_custom_e_recusado(tmp_path):
     assert "custom" in str(exc.value)
 
 
-def test_o_backup_valido_entra_no_relatorio_com_o_hash(tmp_path):
+def test_o_backup_sem_evidencia_e_recusado(tmp_path):
+    """
+    A well-formed archive is not evidence.
+
+    `PGDMP` and a hash say the file is an archive. They say nothing about
+    which database it came from, when, or whether it restores.
+    """
     dump = tmp_path / "openwec.dump"
-    conteudo = b"PGDMP" + b"\x00" * 64
-    dump.write_bytes(conteudo)
-    prova = backup_evidence(dump)
-    assert prova["bytes"] == len(conteudo)
-    assert prova["sha256"] == hashlib.sha256(conteudo).hexdigest()
+    dump.write_bytes(b"PGDMP" + b"\x00" * 64)
+    with pytest.raises(HistoricalBlocked) as exc:
+        backup_evidence(dump)
+    assert "sem evidencia utilizavel" in str(exc.value)
+
+
+def test_o_backup_com_evidencia_entra_no_relatorio(tmp_path):
+    dump = com_evidencia(tmp_path)
+    prova = backup_evidence(dump, agora=AGORA)
+    assert prova["sha256"] == hashlib.sha256(dump.read_bytes()).hexdigest()
+    assert prova["cluster_de_origem"] == CLUSTER_ORIGEM
+    assert prova["capturado_em"].startswith("2026-10-23T18:00")
+    assert prova["restauracao"]["ok"] is True
+    assert prova["contagens"]["laps"] == CONTAGENS["laps"]
+
+
+def test_o_backup_velho_demais_e_recusado(tmp_path):
+    dump = com_evidencia(tmp_path)
+    with pytest.raises(HistoricalBlocked) as exc:
+        backup_evidence(dump, agora=AGORA + timedelta(hours=7))
+    assert "acima do limite" in str(exc.value)
+
+
+def test_o_backup_de_outro_cluster_e_recusado_na_pre_validacao(tmp_path):
+    """The check the file alone cannot make: is this a pre-image of the target?"""
+    dump = com_evidencia(tmp_path)
+    backup = backup_evidence(dump, agora=AGORA)
+    cur = CursorFalso([[(CLUSTER,)], [(CLUSTER,)]])
+    with pytest.raises(HistoricalBlocked) as exc:
+        preflight(cur, ALLOWED_SESSION, [], CLUSTER, backup)
+    assert "nao corresponde ao alvo" in str(exc.value)
+
+
+def test_o_banco_que_mudou_desde_o_backup_e_recusado(tmp_path):
+    dump = com_evidencia(tmp_path)
+    backup = backup_evidence(dump, agora=AGORA)
+    mudou = dict(CONTAGENS, drivers=CONTAGENS["drivers"] + 1)
+    cur = CursorFalso(
+        [[(CLUSTER_ORIGEM,)]] + [[(CLUSTER_ORIGEM,)]]
+        + [[(mudou[t],)] for t in ESSENTIAL_TABLES]
+        + [[(3108, 1554)]])
+    with pytest.raises(HistoricalBlocked) as exc:
+        preflight(cur, ALLOWED_SESSION, [], CLUSTER_ORIGEM, backup)
+    assert "mudou desde o backup" in str(exc.value)
+
+
+def test_sem_backup_a_pre_validacao_nao_compara(tmp_path):
+    """`preflight` is callable read-only, for the preconditions report."""
+    cur = CursorFalso([[(CLUSTER,)], []])
+    with pytest.raises(HistoricalBlocked) as exc:
+        preflight(cur, ALLOWED_SESSION, [], CLUSTER)
+    assert "nao existe" in str(exc.value)
 
 
 # ── The source ───────────────────────────────────────────────

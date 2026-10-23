@@ -23,7 +23,9 @@ against a constant.
 
   1. the session asked for is 2226;
   2. a backup file exists, is a PostgreSQL custom-format archive, and its
-     hash is recorded in the report;
+     attestation proves it: the hash describes that file, it was captured
+     from this cluster within the allowed window, its restore was verified
+     in a different cluster, and its counts still match the target;
   3. the cluster the operator says they are writing to is the one
      `pg_control_system()` reports — not a host, not a port, not a name;
   4. the session's identity in the database is the one that was rehearsed:
@@ -54,6 +56,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "loader"))
 
 from load_classification import read_csv  # noqa: E402
+from database.recovery.backup_attestation import (  # noqa: E402
+    DEFAULT_MAX_AGE_HOURS,
+    AttestationInvalid,
+    assert_matches_target,
+    validate as validate_attestation,
+)
 from database.recovery.recover_classification import (  # noqa: E402
     RecoveryBlocked,
     assert_complete_match,
@@ -134,7 +142,8 @@ def cluster_identifier(cur) -> str:
     return str(linha[0])
 
 
-def backup_evidence(caminho: Path) -> dict:
+def backup_evidence(caminho: Path, agora=None,
+                    max_age_hours: int = DEFAULT_MAX_AGE_HOURS) -> dict:
     """
     What the report will say about the backup, and the refusal if there isn't one.
 
@@ -142,6 +151,14 @@ def backup_evidence(caminho: Path) -> dict:
     `pg_restore` reads and what the revert procedure assumes. A plain SQL
     dump, a truncated download or an empty file would all pass a bare
     existence check and none of them would restore.
+
+    Being a well-formed archive is where the checking used to stop, and it
+    was not enough: a hash says nothing about which database the file came
+    from, when, or whether it restores. The sidecar attestation answers those
+    three, and is refused if it does not describe this exact file, records no
+    successful restore into a different cluster, or is older than the window.
+    Whether it is a pre-image of *this* target is checked later, in
+    `preflight`, where there is a connection to compare against.
     """
     if not caminho.exists() or not caminho.is_file():
         raise HistoricalBlocked(f"backup nao encontrado: {caminho}")
@@ -156,13 +173,23 @@ def backup_evidence(caminho: Path) -> dict:
         raise HistoricalBlocked(
             f"{caminho} nao e um arquivo pg_dump de formato custom (-Fc)")
 
-    digest = hashlib.sha256()
-    with caminho.open("rb") as arquivo:
-        for bloco in iter(lambda: arquivo.read(1 << 20), b""):
-            digest.update(bloco)
+    try:
+        prova = validate_attestation(caminho, agora, max_age_hours)
+    except AttestationInvalid as exc:
+        raise HistoricalBlocked(f"backup sem evidencia utilizavel: {exc}") from exc
 
-    return {"caminho": str(caminho), "bytes": tamanho,
-            "sha256": digest.hexdigest()}
+    return {
+        "caminho": str(caminho),
+        "bytes": tamanho,
+        "sha256": prova["sha256"],
+        "cluster_de_origem": prova["cluster_de_origem"],
+        "capturado_em": prova["capturado_em"],
+        "idade_horas": prova["idade_horas"],
+        "contagens": prova["contagens"],
+        "sessao": prova["sessao"],
+        "restauracao": prova["restauracao"],
+        "_prova": prova,
+    }
 
 
 def source_evidence(caminho: Path) -> dict:
@@ -244,7 +271,8 @@ def other_sessions_digest(cur, session_id: int) -> tuple[str, int]:
     return digest, quantas
 
 
-def preflight(cur, session_id: int, rows: list[dict], cluster_declarado: str) -> dict:
+def preflight(cur, session_id: int, rows: list[dict], cluster_declarado: str,
+              backup: dict | None = None) -> dict:
     """Every check that must pass before a single row is touched."""
     if session_id != ALLOWED_SESSION:
         raise HistoricalBlocked(
@@ -255,6 +283,15 @@ def preflight(cur, session_id: int, rows: list[dict], cluster_declarado: str) ->
     if cluster != cluster_declarado:
         raise HistoricalBlocked(
             "o cluster do alvo nao e o declarado em --expect-cluster")
+
+    # The backup has to be a pre-image of the database about to be written
+    # to, not merely a valid archive of some database at some time.
+    if backup is not None:
+        try:
+            assert_matches_target(backup["_prova"], cur, session_id)
+        except AttestationInvalid as exc:
+            raise HistoricalBlocked(
+                f"o backup nao corresponde ao alvo: {exc}") from exc
 
     identidade = session_identity(cur, session_id)
     if identidade != SESSION_IDENTITY:
@@ -453,6 +490,10 @@ def describe(pre: dict, backup: dict, fonte: dict, saida) -> None:
           f"({fonte['bytes']} bytes)", file=saida)
     print(f"  backup          {backup['caminho']} "
           f"({backup['bytes']} bytes, {backup['sha256'][:16]}…)", file=saida)
+    print(f"  evidencia       capturado {backup['capturado_em']} "
+          f"({backup['idade_horas']} h), cluster "
+          f"{backup['cluster_de_origem']}, restauracao verificada em "
+          f"{backup['restauracao']['cluster_de_destino']}", file=saida)
     print(f"  estado          {pre['estado_inicial']}", file=saida)
     print(f"  antes           {pre['antes']}", file=saida)
     print(f"  pareados        {pre['pareados']} carros, preservados por id",
@@ -467,7 +508,8 @@ def describe(pre: dict, backup: dict, fonte: dict, saida) -> None:
 
 def execute(cfg: dict, session_id: int, csv_path: Path, backup_path: Path,
             cluster_declarado: str, entrada=None, saida=None,
-            falha_simulada: str | None = None) -> dict:
+            falha_simulada: str | None = None,
+            max_age_hours: int = DEFAULT_MAX_AGE_HOURS) -> dict:
     """
     One transaction: validate, write, validate again, commit or roll back.
 
@@ -484,17 +526,17 @@ def execute(cfg: dict, session_id: int, csv_path: Path, backup_path: Path,
         "transacao": "nao iniciada",
     }
 
-    backup = backup_evidence(backup_path)
+    backup = backup_evidence(backup_path, max_age_hours=max_age_hours)
     fonte = source_evidence(csv_path)
     rows = read_csv(csv_path)
-    relatorio["backup"] = backup
+    relatorio["backup"] = {k: v for k, v in backup.items() if k != "_prova"}
     relatorio["fonte"] = fonte
 
     conn = psycopg2.connect(connect_timeout=5, **cfg)
     conn.autocommit = False
     try:
         with conn.cursor() as cur:
-            pre = preflight(cur, session_id, rows, cluster_declarado)
+            pre = preflight(cur, session_id, rows, cluster_declarado, backup)
             plano = pre.pop("plano")
             relatorio["pre_validacao"] = {
                 k: v for k, v in pre.items() if k != "ids_dos_cars_a_remover"}
@@ -555,6 +597,9 @@ def main() -> int:
     ap.add_argument("--user", default="openwec")
     ap.add_argument("--password", default="")
     ap.add_argument("--report", type=Path, required=True)
+    ap.add_argument("--max-backup-age-hours", type=int,
+                    default=DEFAULT_MAX_AGE_HOURS,
+                    help="how old the attestation may be (default: 6)")
     ap.add_argument("--simulate-failure")
     args = ap.parse_args()
 
@@ -564,7 +609,8 @@ def main() -> int:
     try:
         relatorio = execute(cfg, args.session_id, args.csv, args.backup,
                             args.expect_cluster,
-                            falha_simulada=args.simulate_failure)
+                            falha_simulada=args.simulate_failure,
+                            max_age_hours=args.max_backup_age_hours)
     except HistoricalRecoveryFailed as exc:
         args.report.write_text(
             json.dumps(exc.relatorio, ensure_ascii=False, indent=2, default=str),

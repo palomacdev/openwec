@@ -70,6 +70,51 @@ com a assinatura `PGDMP`. Um dump SQL simples passaria por uma checagem de
 existência e não restauraria — e o procedimento de reversão supõe
 `pg_restore`.
 
+### 3.1.1 A evidência que acompanha o dump
+
+Assinatura e hash dizem que o arquivo é um arquivo bem formado. **Não dizem
+de qual banco ele veio, quando, nem se restaura.** Um sidecar
+`<dump>.attestation.json` responde às três, em dois passos que têm de
+acontecer de verdade:
+
+```bash
+# logo depois do dump, contra a origem (somente leitura)
+python -m database.recovery.backup_attestation capture \
+  --dump openwec-prerecovery.dump --port 5433 --password "$DB_PASSWORD"
+
+# depois de restaurar numa instancia descartavel, contra ela
+python -m database.recovery.backup_attestation verify-restore \
+  --dump openwec-prerecovery.dump --port 5457 --password <senha descartavel>
+```
+
+`capture` grava o `system_identifier` da origem, o momento, as contagens das
+7 tabelas que a recuperação toca, o estado da sessão 2226 e o sha256 do
+arquivo. `verify-restore` **conta as mesmas tabelas na instância restaurada**
+e registra se bateram, junto do cluster onde a verificação ocorreu —
+verificar no próprio cluster de origem é recusado, porque não provaria nada.
+
+`MEASURED`, a evidência do backup desta PR:
+
+```
+sha256              c097353ac42e8d40bb4ca3d86c022b270fb8e100a72ec7171a9017b23fcd3560
+cluster_de_origem   7642299396037144610
+capturado_em        2026-10-23T20:10:58+00:00
+contagens           sessions 5.425 · cars 671.353 · results 671.353
+                    result_drivers 469.457 · laps 2.034.223 · drivers 2.845 · teams 1.111
+sessao 2226         results 3.108 · laps 1.554
+restauracao         ok, cluster 7699958109218349090, divergencias {}
+```
+
+`api_key_requests` fica **fora** da comparação: ela anda sozinha enquanto a
+API atende, e um backup não está velho porque uma requisição foi registrada
+depois dele.
+
+**A verificação não é decorativa.** `MEASURED`: a primeira tentativa de
+`verify-restore` foi feita contra a cópia em 5456 e **falhou** —
+`drivers 2.845 → 2.862` —, porque aquela cópia carrega as 17 linhas órfãs
+que a reversão testada do §8.1 deixou para trás. Ela não é mais uma
+restauração fiel daquele dump, e a evidência disse isso.
+
 ### 3.2 Verificar que restaura
 
 `MEASURED`, numa instância nova e descartável:
@@ -106,7 +151,7 @@ Todas têm de abrir, e **nenhuma é uma flag de autorização**.
 | # | porta |
 |---:|---|
 | 1 | a sessão pedida é 2226 |
-| 2 | o backup existe, é `pg_dump -Fc`, e o hash dele entra no relatório |
+| 2 | o backup existe, é `pg_dump -Fc`, **e a evidência ao lado dele prova**: o hash descreve aquele arquivo, foi capturado deste cluster dentro da janela de idade, teve a restauração verificada **em outro cluster**, e as contagens ainda batem com o alvo |
 | 3 | o cluster declarado em `--expect-cluster` é o que `pg_control_system()` reporta |
 | 4 | a identidade da sessão no banco é a ensaiada |
 | 5 | a fonte tem o sha256 ensaiado |
@@ -131,6 +176,13 @@ dele nem importa as suas funções de guarda, e um teste afirma as duas coisas.
 # 1. backup, imediatamente antes
 docker exec openwec-db pg_dump -U openwec -d openwec -Fc \
   --no-owner --no-privileges > openwec-prerecovery.dump
+
+# 1b. a evidencia: capturar na origem, provar a restauracao numa descartavel
+python -m database.recovery.backup_attestation capture \
+  --dump openwec-prerecovery.dump --port 5433 --password "$DB_PASSWORD"
+#     ... restaurar o dump numa instancia descartavel (ver 3.2) ...
+python -m database.recovery.backup_attestation verify-restore \
+  --dump openwec-prerecovery.dump --port 5457 --password <senha descartavel>
 
 # 2. a fonte, para fora de raw/
 curl -s -o 05_Classification_Race.CSV \
@@ -192,7 +244,7 @@ Uma única falha derruba tudo por `ROLLBACK`.
 `7699952836394844194`, **com o mesmo mecanismo transacional da execução
 real**.
 
-### 7.1 Oito recusas, nenhuma escrita
+### 7.1 Onze recusas, nenhuma escrita
 
 | tentativa | resultado |
 |---|---|
@@ -200,13 +252,16 @@ real**.
 | `--expect-cluster` do histórico contra a cópia | `o cluster do alvo nao e o declarado` |
 | backup inexistente | `backup nao encontrado` |
 | backup que é um CSV | `nao e um arquivo pg_dump de formato custom (-Fc)` |
+| **backup sem evidência ao lado** | `o backup nao tem evidencia: …attestation.json nao existe` |
+| **evidência de outro cluster** | `o backup e do cluster 7642299396037144610, e o alvo e 7699952836394844194` |
+| **evidência fora da janela de idade** | `o backup tem 0:00:42, acima do limite de 0 h` |
 | fonte adulterada em 15 bytes | `a fonte nao e a que foi ensaiada: sha256 f80cc960…` |
 | **nada digitado** | `confirmacao ausente` |
 | sessão confirmada como 9999 | `confirmacao invalida` |
 | cluster confirmado como o do histórico | `confirmacao invalida` |
 
-`MEASURED`: saída 2 nas oito; depois delas `results` continua **3.108** e o
-digest da sessão está **inalterado**.
+`MEASURED`: saída 2 nas **onze**; depois delas `results` continua **3.108** e
+o digest da sessão está **inalterado**.
 
 ### 7.2 Falha depois da escrita, antes do commit
 
@@ -231,10 +286,23 @@ transação **commit**.
 
 ### 7.4 Reexecução
 
-`MEASURED`: a segunda execução é aceita com estado inicial **"já
-recuperada"**, remove **0** `cars`, grava as mesmas 28 linhas, e o digest da
-sessão fica **idêntico** — `638332c41df474dc6fa215f483a38925`. Contagens
-globais idênticas, outras sessões intactas.
+`MEASURED`: com o **mesmo** backup, a segunda execução é **recusada** —
+
+```
+ROLLBACK: o backup nao corresponde ao alvo: o banco mudou desde o backup:
+{'cars': (671353, 668273), 'results': (671353, 668273),
+ 'result_drivers': (469457, 469511)}
+```
+
+`DERIVED`: é a consequência correta da porta 2. Depois da recuperação, aquele
+dump deixou de ser uma pré-imagem do alvo, e portanto deixou de ser um
+caminho de volta. **Toda execução exige um backup novo**, inclusive a
+segunda.
+
+`MEASURED`: com backup novo, capturado e com restauração verificada, a
+segunda execução é aceita com estado inicial **"já recuperada"**, remove
+**0** `cars`, grava as mesmas 28 linhas, e o digest da sessão fica
+**idêntico** — `638332c41df474dc6fa215f483a38925`.
 
 ---
 
