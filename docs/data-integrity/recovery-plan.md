@@ -163,7 +163,10 @@ divergência entre o ensaio e a previsão.
 **Elegibilidade:** as 158.275 linhas de `laps` cujo `car_id` está entre os
 1.566 `cars` criados pela contaminação.
 **Operação:** para cada par (sessão, tupla), eleger um `car_id` canônico e
-re-apontar as voltas para ele. São 1.665 entradas competitivas reais.
+re-apontar as voltas para ele. São **1.534** entradas competitivas com
+voltas. As outras 131 das 1.665 entradas existem apenas em `results` e não
+têm volta nenhuma para re-apontar — ver §7 do
+[lap-collision-assessment.md](lap-collision-assessment.md).
 **Evidência:** todos os candidatos de um par compartilham as oito colunas de
 identidade — são o mesmo carro pela regra do próprio carregador.
 **Colisões:** 3.735 grupos, tratados pela regra da Fase 2. **Nenhuma linha é
@@ -172,7 +175,7 @@ movida antes disso.**
 canônico de um par é função da tupla, não da ordem de execução.
 **Validação:** `count(*)` de `laps` igual ao anterior, menos exatamente o
 que a regra da Fase 2 previa descartar; nenhuma volta sem `car_id`;
-`count(DISTINCT car_id)` nessas sessões igual a 1.665.
+`count(DISTINCT car_id)` nessas sessões igual a **1.534**.
 **Interrupção:** qualquer volta que ficaria órfã; qualquer colisão fora dos
 3.735 inventariados.
 
@@ -352,7 +355,8 @@ Em **todos** os tratamentos, dois invariantes valem sem exceção:
 | invariante | valor |
 |---|---|
 | `laps` dessas sessões preservadas e apontando para `cars` existentes | 158.275 |
-| entradas competitivas reais representadas em `laps` | 1.665 |
+| entradas competitivas representadas em `laps` | **1.534** |
+| entradas que existem só em `results`, fora do alcance da Fase 3 | 131 |
 
 > A remoção de registros contaminados **não é violação automática** do
 > invariante global — ela tem população e critérios próprios. E o fato de
@@ -432,7 +436,7 @@ A recuperação está concluída quando, e só quando:
 | 2 | nenhum par (sessão, tupla) com voltas em mais de um `car_id` | 0 |
 | 3 | `laps` sem perda não justificada | 2.034.223 menos exatamente o que a regra da Fase 2 previu descartar |
 | 4 | entradas lógicas legítimas preservadas | 94.438 |
-| 5 | entradas representadas nas voltas das 52 sessões | 1.665, qualquer que seja o tratamento |
+| 5 | entradas representadas nas voltas das 52 sessões | **1.534**, qualquer que seja o tratamento |
 | 6 | valores recuperados presentes | 312.144 |
 | 7 | restrições únicas íntegras | as quatro |
 | 8 | derivadas recalculadas | `analytics_*` consistentes com `laps` |
