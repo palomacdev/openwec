@@ -386,6 +386,8 @@ PostgreSQL. Corrigido na PR #41 para novas cargas; o acervo mantém o efeito.
 | `laps` apontando para `cars` criados por elas | 158.275 |
 | `cars` distintos que recebem essas voltas | 1.566 |
 | entradas competitivas reais | 1.665 |
+| destas, com pelo menos uma volta | 1.534 |
+| destas, sem nenhuma volta | 131 |
 
 As voltas em si são corretas: vieram do arquivo de análise lido como análise.
 O que está errado é o `car_id` a que se agarram, escolhido arbitrariamente
