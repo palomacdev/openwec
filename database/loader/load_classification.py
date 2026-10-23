@@ -139,12 +139,25 @@ def parse_race_time(s: str) -> float | None:
     """
     Parses total race time to seconds.
     "24:01'55.856"  → 86515.856
+    "2:01:25.448"   → 7285.448
     "4:00'20.026"   → 14420.026
     "1:35.605"      → 95.605  (lap time format, fallback)
+
+    The hour is written two ways, and the second one has to be recognised
+    before the minute:second branch can see it. `2:01:25.448` read as M:SS
+    stops at the second colon and yields 121.0 s — a two-hour race recorded
+    as two minutes, with no error raised. `MEASURED` over the 3,539
+    classification files of the local tree: 11,123 rows carry TOTAL_TIME in
+    H:MM:SS form (8,177 as `H:MM:SS.mmm`, 2,946 as `HH:MM:SS.mmm`).
     """
     if not s or s.strip() in ("-", "", "0"):
         return None
     s = s.strip()
+    # Format: H:MM:SS.mmm  or  HH:MM:SS.mmm — tried first, because the
+    # M:SS branch below matches its prefix and would truncate it silently.
+    m = re.match(r"(\d+):(\d+):([\d.]+)$", s)
+    if m:
+        return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
     # Format: H:MM'SS.mmm  or  HH:MM'SS.mmm
     m = re.match(r"(\d+):(\d+)'([\d.]+)", s)
     if m:
@@ -190,32 +203,62 @@ def parse_gap(s: str) -> float | None:
     "-" or "" → None (first place)
     "1 Lap"   → None (lapped)
     "12.345"  → 12.345
+    "+2.167"  → 2.167
+    "+1:16.850" → 76.85
+
+    The leading "+" is dropped before parsing. Both time parsers anchor on a
+    digit, so a signed gap of more than a minute reached neither of them and
+    came back None while the raw string was stored intact. `MEASURED` over
+    the 3,539 classification files: 726 rows carry GAP_FIRST in signed
+    minute form (`+M:SS.mmm` or `+MM:SS.mmm`). A gap under a minute parsed
+    only because `float("+2.167")` accepts the sign.
     """
     if not s or s.strip() in ("-", "", "0"):
         return None
     s = s.strip()
     if "lap" in s.lower():
         return None
+    if s.startswith("+"):
+        s = s[1:].strip()
+        if not s:
+            return None
     return parse_lap_time(s) or parse_race_time(s)
 
 
+CANONICAL_STATUS = {status.lower(): status for status in VALID_STATUSES}
+
+
 def normalize_status(s: str) -> str:
+    """
+    The negations are tested before the word they negate.
+
+    "Not classified" contains "classified", so a substring test that asks
+    about the positive first answers `Classified` for a car that was not —
+    the one reading where a wrong answer is worse than `Other`, because it
+    puts a car in the result order that the source excluded from it.
+    `MEASURED` over the 3,539 classification files of the local tree: 855
+    rows spell it "Not classified", which `VALID_STATUSES` holds only as
+    "Not Classified". Matching is therefore case-folded as well.
+    """
     if not s:
         return "Other"
     s = s.strip()
-    if s in VALID_STATUSES:
-        return s
+    canonical = CANONICAL_STATUS.get(s.lower())
+    if canonical:
+        return canonical
     low = s.lower()
-    if "classify" in low or "classified" in low:
-        return "Classified"
-    if "dnf" in low or "not finish" in low:
-        return "DNF"
     if "dns" in low or "not start" in low:
         return "DNS"
+    if "not classif" in low or "non classif" in low:
+        return "Not Classified"
+    if "dnf" in low or "not finish" in low:
+        return "DNF"
     if "dsq" in low or "disq" in low:
         return "DSQ"
     if "retired" in low or "retir" in low:
         return "Retired"
+    if "classify" in low or "classified" in low:
+        return "Classified"
     return "Other"
 
 
