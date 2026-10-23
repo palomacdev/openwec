@@ -129,18 +129,45 @@ def read_csv(path: Path) -> list[dict]:
 
 # ── Final analysis finder ─────────────────────────────────────
 
+# An `analysis/` folder holds nothing but lap analyses, but the search falls
+# back to `other/` when it is absent, and `other/` holds four kinds of CSV —
+# measured across the corpus: 435 weather logs, 299 classifications, 138
+# analyses and 103 result sheets. Only one of them has a row per lap.
+#
+# Two spellings are a lap analysis, both present in the corpus and both
+# carrying the lap header (NUMBER, LAP_NUMBER, LAP_TIME, S1..S3, ELAPSED):
+#
+#   23_Analysis_*                        2.227 files
+#   23_AnalysisEnduranceWithSections_*      30 files, the same rows with
+#                                            extra intermediate points
+#
+# Hence the prefix without the underscore: requiring `23_Analysis_` would
+# throw the second spelling away.
+ANALYSIS_FILE = re.compile(r"^23_analysis", re.IGNORECASE)
+
+
+def is_analysis_file(path: Path) -> bool:
+    return path.suffix.lower() == ".csv" and bool(ANALYSIS_FILE.match(path.name))
+
+
 def get_final_analysis(analysis_dir: Path) -> Path | None:
     """
     Finds the final (highest hour) analysis CSV.
     Same logic as classification — picks max hour subfolder.
+
+    A folder holding no lap analysis yields None. There is no fallback to
+    another kind of CSV: a session that published no analysis has none, and
+    reading its classification instead feeds a row per car to a parser that
+    expects a row per lap.
     """
     if not analysis_dir.exists():
         return None
-    
-    # For others
-    all_csvs = list(analysis_dir.rglob("*.CSV"))
-    if not all_csvs:
-        all_csvs = list(analysis_dir.rglob("*.csv"))
+
+    # rglob covers both shapes — files directly in the folder and the hourly
+    # sub-folders. The suffix is matched case-insensitively so the same files
+    # are seen on Windows and on the case-sensitive CI runner.
+    all_csvs = [p for p in analysis_dir.rglob("*")
+                if p.is_file() and is_analysis_file(p)]
     if not all_csvs:
         return None
 
@@ -157,35 +184,23 @@ def get_final_analysis(analysis_dir: Path) -> Path | None:
                 return int(m.group(1))
         return 0
 
-    return max(all_csvs, key=hour_key)
+    def selection_key(p: Path) -> tuple[int, int, str]:
+        """
+        The hour decides, and the rest only has to decide the same way twice.
 
-    # Only analysis files (prefix 23_) ALMS 
-    # all_csvs = [
-    #     p for p in analysis_dir.rglob("*.CSV")
-    #     if p.name.lower().startswith("23_")
-    # ]
-    # if not all_csvs:
-    #     all_csvs = [
-    #         p for p in analysis_dir.rglob("*.csv")
-    #         if p.name.lower().startswith("23_")
-    #     ]
-    # if not all_csvs:
-    #     return None
+        28 folders hold both spellings of the same session. Measured on one
+        of them: 2.215 rows each, the same (NUMBER, LAP_NUMBER) set, and all
+        25 columns the lap parser reads present in both — the variant only
+        adds intermediate-point columns nothing here looks at. So the choice
+        does not change the laps, but it must not change with the platform
+        either, and ordering Path objects does: it folds case on Windows and
+        not on Linux, which hands the two runners different files. The plain
+        spelling wins, being the one the other 2.227 files use.
+        """
+        variant = p.name.lower().startswith("23_analysisendurance")
+        return (hour_key(p), 0 if variant else 1, p.name.casefold())
 
-    # if len(all_csvs) == 1:
-    #     return all_csvs[0]
-
-    # def hour_key(p: Path) -> int:
-    #     for text in [p.parent.name, p.name]:
-    #         m = re.search(r"[Hh]our\s*(\d+)", text)
-    #         if m:
-    #             return int(m.group(1))
-    #         m = re.match(r"(\d+)_", text)
-    #         if m:
-    #             return int(m.group(1))
-    #     return 0
-
-    # return max(all_csvs, key=hour_key)
+    return max(all_csvs, key=selection_key)
 
 
 # ── DB lookups ────────────────────────────────────────────────
