@@ -28,6 +28,14 @@ lap log left empty — vehicle, class, group, tyres — are written only where
 the column is NULL. A column that disagrees is left alone and reported: a
 spelling difference between two sources is not evidence that one is wrong.
 
+One published car may stand without a lap, and only one kind: one the source
+credits with `LAPS = 0` under a status saying it did not take part. A car
+that completed no lap cannot appear in a lap log, so its absence there is
+what the two sources agreeing looks like. It gets an identity of its own and
+a result, and no lap is invented for it. Every other unmatched number is
+still a refusal — this is an exception for one measured shape, not a general
+tolerance for partial matching.
+
 ## The guard
 
 Five gates, and all five have to open. There is no flag that skips one.
@@ -64,13 +72,17 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "loader"))
 
 from load_classification import (  # noqa: E402
+    as_int,
     car_identity,
     extract_drivers,
     field,
     insert_result,
     insert_result_drivers,
+    normalize_status,
     read_csv,
+    upsert_car,
     upsert_driver,
+    upsert_team,
 )
 from row_identity import DriverOutcome  # noqa: E402
 
@@ -282,6 +294,35 @@ class Plan:
     matched: dict[str, int] = dataclass_field(default_factory=dict)
     source_without_laps: list[str] = dataclass_field(default_factory=list)
     laps_without_source: dict[str, int] = dataclass_field(default_factory=dict)
+    zero_lap: list[str] = dataclass_field(default_factory=list)
+
+
+# The normalised statuses a car may carry and still be admitted with no lap.
+# `VALID_STATUSES` has no "Not Started": the source spells it "Not started"
+# and `normalize_status` maps that to `DNS`, which is the same fact under the
+# name the enum uses.
+ZERO_LAP_STATUSES = frozenset({"Not Classified", "DNS"})
+
+
+def zero_lap_exception(row: dict) -> bool:
+    """
+    Whether this published car may stand without a lap of its own.
+
+    A car that completed no lap cannot appear in a lap log, so its absence
+    there is not a disagreement between the sources — it is what the sources
+    agreeing looks like. The exception is deliberately narrow: `LAPS` has to
+    be the number zero, which `as_int` returns only for a value the source
+    actually wrote, never for an empty field; and the status has to be one
+    the source uses to say the car did not take part.
+
+    `MEASURED` (PR #54): the ten sessions blocked only by an unmatched
+    published car were blocked by eleven cars, and every one of them has
+    `LAPS = 0` with `Not classified` or `Not started`. Nothing wider than
+    that is admitted here: a car with laps the log does not know, or one
+    whose status says it raced, is still a refusal.
+    """
+    return (as_int(field(row, "LAPS")) == 0
+            and normalize_status(field(row, "STATUS")) in ZERO_LAP_STATUSES)
 
 
 def lap_cars(cur, session_id: int) -> dict[str, list[int]]:
@@ -323,10 +364,18 @@ def plan_recovery(cur, session_id: int, rows: list[dict]) -> Plan:
             + ", ".join(ambiguos))
 
     plano = Plan()
+    por_numero = {r.get("NUMBER", "").strip(): r for r in rows}
     for numero in numeros_fonte:
         ids = das_voltas.get(numero)
         if ids:
             plano.matched[numero] = ids[0]
+        elif (numero not in das_voltas
+              and zero_lap_exception(por_numero[numero])):
+            # Admitted without a lap, and only because it says it ran none.
+            # The `not in das_voltas` is belt and braces: a number with laps
+            # took the branch above, and one whose laps are spread over two
+            # cars never reaches here, because that is refused up front.
+            plano.zero_lap.append(numero)
         else:
             plano.source_without_laps.append(numero)
 
@@ -335,6 +384,42 @@ def plan_recovery(cur, session_id: int, rows: list[dict]) -> Plan:
         if numero not in plano.matched
     }
     return plano
+
+
+def assert_zero_lap_identity(cur, plan: Plan, por_numero: dict[str, dict],
+                             series_key: str) -> dict[str, int]:
+    """
+    A car for each admitted zero-lap number, or a refusal.
+
+    `upsert_car` looks the identity up before inserting, on every column the
+    loader writes, so a second run of the same recovery finds the row the
+    first one made. What this adds is the check that the identity it lands on
+    is not already in use by this session: a zero-lap car that resolved to a
+    car already carrying one of the session's matched results would be two
+    published rows on one `car_id`, and `results` is keyed on that.
+    """
+    ocupados = dict(plan.matched)
+    resolvidos: dict[str, int] = {}
+
+    for numero in plan.zero_lap:
+        row = por_numero[numero]
+        equipe = field(row, "TEAM") or "Unknown"
+        team_id = upsert_team(cur, equipe)
+        car_id = upsert_car(cur, numero, team_id, row, series_key)
+        if car_id is None:
+            raise RecoveryBlocked(
+                f"o carro {numero}, sem voltas, nao pode ter identidade criada")
+
+        ja = next((n for n, i in ocupados.items() if i == car_id), None)
+        if ja is not None:
+            raise RecoveryBlocked(
+                f"o carro {numero}, sem voltas, resolveu para a mesma "
+                f"identidade do carro {ja}")
+
+        ocupados[numero] = car_id
+        resolvidos[numero] = car_id
+
+    return resolvidos
 
 
 def assert_complete_match(plan: Plan) -> None:
@@ -460,7 +545,16 @@ def recover_session(cur, session_id: int, rows: list[dict], series_key: str,
     DELETE, whoever calls this.
     """
     assert_complete_match(plan)
-    keep = sorted(plan.matched.values())
+
+    por_numero = {r["NUMBER"].strip(): r for r in rows}
+
+    # Resolved before the delete, and kept with the matched ones. A zero-lap
+    # car has no lap to protect it: if its id were not in `keep`, the second
+    # run would delete the result the first one wrote and mint a new car for
+    # it, which is the churn this routine exists to avoid.
+    sem_voltas = assert_zero_lap_identity(cur, plan, por_numero, series_key)
+    identidades = {**plan.matched, **sem_voltas}
+    keep = sorted(identidades.values())
 
     results_removidos, cars_removidos = drop_lap_shaped_results(
         cur, session_id, keep)
@@ -473,10 +567,9 @@ def recover_session(cur, session_id: int, rows: list[dict], series_key: str,
     pilotos_ambiguos = 0
     pilotos_na_fonte = 0
 
-    por_numero = {r["NUMBER"].strip(): r for r in rows}
-    for numero in sorted(plan.matched, key=lambda n: int(n) if n.isdigit() else 0):
+    for numero in sorted(identidades, key=lambda n: int(n) if n.isdigit() else 0):
         row = por_numero[numero]
-        car_id = plan.matched[numero]
+        car_id = identidades[numero]
 
         equipe = team_divergence(cur, car_id, field(row, "TEAM"))
         if equipe:
@@ -509,6 +602,7 @@ def recover_session(cur, session_id: int, rows: list[dict], series_key: str,
         "results_removidos": results_removidos,
         "cars_removidos": cars_removidos,
         "results_gravados": gravados,
+        "cars_sem_voltas": sem_voltas,
         "colunas_de_car_preenchidas": colunas_preenchidas,
         "cars_com_divergencia": divergencias,
         "equipes_com_grafia_divergente": equipes_divergentes,
@@ -544,6 +638,7 @@ def run(session_id: int, csv_path: Path, series_key: str,
                 "linhas_na_fonte": len(rows),
                 "antes": antes.as_dict(),
                 "pareados": len(plano.matched),
+                "sem_voltas_admitidos": plano.zero_lap,
                 "fonte_sem_voltas": plano.source_without_laps,
                 "voltas_sem_fonte": sorted(plano.laps_without_source),
             }
