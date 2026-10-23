@@ -191,6 +191,12 @@ dialeto e era lida. Nas 52 sessões, `laps_completed` é nulo em 324.720 de
 
 ### 3.4 Campos reconstruíveis a partir das classificações originais
 
+> **Corrigido pelas PRs #48, #49 e #50.** O parágrafo abaixo é a leitura de
+> 2026-10-22 e **continua registrado como foi escrito**, porque a medição
+> que o sustenta — não há arquivo de classificação nas 51 pastas de `raw/` —
+> segue correta. A **conclusão** tirada dela estava errada: a ausência é no
+> nosso acervo, não na fonte. Ver §3.4.1.
+
 **Nenhum.** As 51 pastas não têm arquivo de classificação — foi exatamente
 por isso que o carregador caiu no arquivo de análise. Não existe fonte da
 qual reconstruir posição, tempo total, status ou melhor volta para elas.
@@ -199,6 +205,37 @@ O que existe é a volta: **158.275 linhas de `laps`** nessas sessões, carregada
 corretamente por `load_laps` a partir dos mesmos arquivos de análise. O
 arquivo de origem tem 162.360 linhas com `NUMBER`; a diferença de 4.085 não
 foi investigada nesta PR.
+
+### 3.4.1 Correção: a fonte existe, e não estava em `raw/`
+
+`MEASURED` (PR #48): o catálogo publica um CSV de classificação para **as
+51 sessões** — 50 sob a família `05_Classification*` e 1 sob `03_Results`.
+`raw/` contém apenas as famílias `03_Classification`, `03_Results`,
+`23_Analysis` e `26_Weather`; **nenhum arquivo `05_`**. `DERIVED`: o
+download buscou `03_`, `23_` e `26_`, e esses eventos publicam a
+classificação sob `05_`.
+
+`MEASURED` (PR #49): as **182 URLs** dessas fontes responderam `HTTP 200`
+com `text/csv`, decodificam em UTF-8, usam `;` e trazem **os 14 campos que
+o parser lê** — zero ausências, zero falhas.
+
+`MEASURED` (PR #50), por entrada de catálogo:
+
+| estado | entradas |
+|---|---:|
+| `FINALITY_CORROBORATED` | **49** |
+| `PARTIAL_OR_DIVERGENT` | 1 |
+| `INDETERMINATE` | 2 |
+
+**`FINALITY_CORROBORATED` significa evidência de classificação posterior à
+chegada, não prova de homologação definitiva.** A distinção está em §9.1 de
+[classification-snapshot-finality-assessment.md](classification-snapshot-finality-assessment.md).
+
+`DERIVED`: o estado correto de A2 deixa de ser `UNRECOVERABLE`. Ver a
+matriz em §7 e a rastreabilidade completa em
+[evidence-reconciliation.md](evidence-reconciliation.md).
+
+**Nenhuma reconstrução foi realizada, e nada aqui a autoriza.**
 
 ### 3.5 Dependências das 324.720 linhas
 
@@ -467,7 +504,7 @@ colunas de quantidade **não devem ser somadas entre famílias**.
 | # | família | dimensão | classe | registros | unidade |
 |---|---|---|---|---:|---|
 | A1 | resultados contaminados | identificar quais linhas são | `RECOVERABLE_EXACT` | 324.720 | linhas de `results` |
-| A2 | resultados contaminados | reconstruir o conteúdo de classificação | `UNRECOVERABLE` | 324.720 | linhas de `results` |
+| A2 | resultados contaminados | reconstruir o conteúdo de classificação | ~~`UNRECOVERABLE`~~ → **`RECOVERABLE_CONDITIONAL`** (PRs #48–#50, §3.4.1) | 324.720 | linhas de `results` |
 | A3 | resultados contaminados | `cars` sem nenhuma outra referência | `RECOVERABLE_EXACT` | 323.154 | linhas de `cars` |
 | A4 | resultados contaminados | `cars` que sustentam voltas, a re-apontar | `RECOVERABLE_CONDITIONAL` | 1.566 | linhas de `cars` |
 | A5 | resultados contaminados | sessão da lista sem nenhum `results` | `UNAFFECTED` | 1 | sessão |
@@ -488,9 +525,18 @@ colunas de quantidade **não devem ser somadas entre famílias**.
 
 - **A1 `RECOVERABLE_EXACT`** — duas evidências independentes selecionam o
   mesmo conjunto, com intervalos disjuntos (§3.1).
-- **A2 `UNRECOVERABLE`** — ausência comprovada, não falta de solução: as 51
-  pastas não têm arquivo de classificação. A remoção dessas linhas não perde
-  informação, porque as voltas que as originaram estão em `laps`.
+- **A2 — atribuído `UNRECOVERABLE` em 2026-10-22, hoje
+  `RECOVERABLE_CONDITIONAL`.** A justificativa de então era: "ausência
+  comprovada, não falta de solução: as 51 pastas não têm arquivo de
+  classificação. A remoção dessas linhas não perde informação, porque as
+  voltas que as originaram estão em `laps`."
+
+  `DERIVED` (PRs #48–#50): a ausência era de `raw/`, não da fonte. A fonte
+  responde e tem os campos; o que condiciona a recuperação são as
+  pré-condições operacionais de §3.4.1 e de
+  [evidence-reconciliation.md](evidence-reconciliation.md). **A frase sobre
+  remover sem perder informação deixa de valer**: removê-las hoje apagaria
+  registros cuja substituição está demonstrada como disponível.
 - **A4, B2, C1, C2, D1 `RECOVERABLE_CONDITIONAL`** — o caminho existe e
   depende de pré-condição ou decisão listada no plano.
 - **B3, B4, C3, D2, D3 `AMBIGUOUS`** — mais de uma interpretação e nenhuma
@@ -503,7 +549,10 @@ colunas de quantidade **não devem ser somadas entre famílias**.
   linha arbitrária de cada grupo.
 
 **Nada foi classificado como `UNRECOVERABLE` por falta de investigação.** A
-única linha nessa classe tem ausência demonstrada na fonte.
+única linha nessa classe tinha ausência demonstrada — em `raw/`. A
+investigação posterior (PRs #48–#50) mostrou que a fonte existe, e a classe
+ficou vazia. `DERIVED`: o critério estava certo; o alcance da palavra
+"ausência" é que não estava delimitado.
 
 ---
 

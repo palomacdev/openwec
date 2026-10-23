@@ -543,3 +543,21 @@ a decisão 1 der o seu resultado — se as URLs não responderem,
 `UNRECOVERABLE` volta a ser o estado correto, por outro motivo. Até lá, o
 registro desta divergência fica aqui, e **as medições originais não foram
 reescritas**.
+
+> **Aplicadas pela PR #51.** A decisão 1 deu o seu resultado: `MEASURED`
+> (PR #49), as 182 URLs responderam. As correções foram levadas aos
+> documentos originais, com a medição de origem preservada e a data de cada
+> leitura registrada. A rastreabilidade completa — afirmação original,
+> defeito, evidência posterior, interpretação atual e pendência — está em
+> [evidence-reconciliation.md](evidence-reconciliation.md).
+
+### 13.1 Esta PR também precisou de correção
+
+`MEASURED` (PR #50): o §1 deste documento afirma que **50** sessões
+publicam `05_Classification` e **1** publica `03_Results`. A contagem de
+arquivos está certa, mas a leitura da sessão IMSA não: o `03_Results.CSV`
+que lhe foi atribuído pertence ao campeonato
+`02_IMSA Continental Tire SportsCar Challenge`, e a sessão contaminada é do
+`01_IMSA WeatherTech`. A fonte que lhe corresponde é
+`05_Results by Hour.CSV`. Ver §7.3 de
+[classification-snapshot-finality-assessment.md](classification-snapshot-finality-assessment.md).
