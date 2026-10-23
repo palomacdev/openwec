@@ -197,10 +197,14 @@ pela tupla** — 42 tuplas aparecem também entre os `cars` legítimos.
 | **marcar** | coluna nova em `results` e `cars` — mudança de schema, fora do escopo atual |
 | **preservar intacto** | nada; é o estado de hoje, e os relatórios passam a excluir as 52 sessões por predicado |
 
-**O que se perde, se o tratamento for remover:** nada que a fonte ainda
-tenha. O conteúdo de classificação nunca existiu para essas sessões (§3.4 do
-assessment) e as voltas permanecem em `laps`, já re-apontadas pela Fase 3.
-Isso é uma constatação sobre conteúdo, **não uma autorização**.
+**O que se perde, se o tratamento for remover.** Esta avaliação **mudou**.
+Em 2026-10-22 ela era: "nada que a fonte ainda tenha. O conteúdo de
+classificação nunca existiu para essas sessões." `MEASURED` (PRs #48–#50): o
+conteúdo **existe publicado e responde**. Removê-las hoje apagaria registros
+cuja substituição está demonstrada como disponível para 49 das 52 entradas,
+**antes** de qualquer tentativa de obtê-la. Isso continua sendo uma
+constatação sobre conteúdo, **não uma autorização** — em nenhuma das duas
+direções.
 
 **Idempotência:** o conjunto é definido por predicado, não por lista de ids.
 **Validação:** ver §6.2 — as 52 sessões têm invariantes próprios, e a queda
@@ -415,8 +419,15 @@ Parar imediatamente, sem tentar contornar, quando:
 **Cinco decisões bloqueiam o início:**
 
 1. O destino das 324.720 linhas: remover, marcar ou preservar.
-2. Se as 51 sessões ficam sem classificação ou se ela deve ser derivada do
-   arquivo de análise — derivar é construir dado novo, não recuperar.
+2. ~~Se as 51 sessões ficam sem classificação ou se ela deve ser derivada do
+   arquivo de análise — derivar é construir dado novo, não recuperar.~~
+
+   **Reformulada pelas PRs #48–#50.** A alternativa não é mais "ficar sem"
+   contra "derivar da análise": `MEASURED`, a classificação **existe
+   publicada** para as 51, e 49 das 52 entradas de catálogo têm finalidade
+   corroborada. A decisão passou a ser **obter a fonte ou não**, e sob quais
+   pré-condições — ver
+   [evidence-reconciliation.md](evidence-reconciliation.md).
 3. A regra de sobrevivência da classe B.
 4. **O que acontece com cada classe dos 35.045 pares em colisão**, depois que
    a Fase 1 disser quantos são idênticos, quantos divergem e quantos ficam

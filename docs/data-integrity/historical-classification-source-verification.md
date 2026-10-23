@@ -353,6 +353,16 @@ corrigido nos documentos originais**, porque a condição que a PR #48 pôs
 para isso — que a verificação desse resultado — está satisfeita. §10 propõe
 quando.
 
+> **Aplicado pela PR #51**, e com duas correções a este documento. As
+> contagens 16/32/4 desta PR continuam registradas como o que esta
+> investigação mediu; a PR #50 as revisou para **49 corroboradas, 1
+> divergente e 2 indeterminadas**, e encontrou dois defeitos de medição
+> meus aqui — duas entradas da Le Mans Cup 2018 dadas como "sem interseção"
+> por descarte de linhas mais curtas que o cabeçalho, e a sessão IMSA de
+> Watkins Glen comparada com o arquivo de outro campeonato. A
+> rastreabilidade está em
+> [evidence-reconciliation.md](evidence-reconciliation.md) §2.
+
 ---
 
 ## 10. Próximas decisões necessárias
