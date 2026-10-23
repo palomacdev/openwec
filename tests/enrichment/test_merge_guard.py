@@ -120,6 +120,81 @@ def test_dry_run_nao_altera_dados(ligacao):
     assert not md.REVIEW_FILE.exists()
 
 
+def test_execucao_padrao_nao_escreve_o_arquivo_de_revisao(ligacao):
+    """
+    Mudou nesta revisão: antes, rodar sem flag nenhuma reescrevia o arquivo
+    versionado. Agora só `--refresh-review-file` escreve.
+    """
+    assert md.run() == 0
+    assert not md.REVIEW_FILE.exists()
+
+
+def test_execucao_padrao_preserva_arquivo_existente(ligacao):
+    md.write_review_file([_decisao(111, 222, md.SKIP)], md.REVIEW_FILE)
+    antes = md.REVIEW_FILE.read_bytes()
+    assert md.run() == 0
+    assert md.REVIEW_FILE.read_bytes() == antes
+
+
+def test_review_nao_altera_nada(ligacao):
+    md.write_review_file([_decisao(111, 222, md.SKIP)], md.REVIEW_FILE)
+    antes = md.REVIEW_FILE.read_bytes()
+    assert md.run(review=True) == 0
+    assert md.REVIEW_FILE.read_bytes() == antes
+    assert ligacao.sql == []            # nem consultou o banco
+
+
+def test_refresh_altera_somente_o_json(ligacao):
+    assert md.run(refresh_review_file=True) == 0
+    assert md.REVIEW_FILE.exists()
+    assert ligacao.escritas == []
+    assert all(c.commits == 0 for c in ligacao.conns)
+
+
+def test_refresh_normaliza_merge_legado(ligacao):
+    md.write_review_file([_decisao(111, 222, md.LEGACY_MERGE,
+                                   merge_from=111, merge_into=222)], md.REVIEW_FILE)
+    assert md.run(refresh_review_file=True) == 0
+    gravado = json.loads(md.REVIEW_FILE.read_text(encoding="utf-8"))
+    assert gravado[0]["action"] == md.PENDING
+    assert gravado[0]["merge_from"] is None and gravado[0]["merge_into"] is None
+
+
+def test_refresh_nao_sobrescreve_arquivo_invalido(ligacao):
+    md.REVIEW_FILE.write_text("{quebrado", encoding="utf-8")
+    antes = md.REVIEW_FILE.read_bytes()
+    assert md.run(refresh_review_file=True) == 2
+    assert md.REVIEW_FILE.read_bytes() == antes
+
+
+def test_escrita_falha_sem_destruir_o_anterior(ligacao, monkeypatch):
+    """Escrita atômica: o arquivo anterior sobrevive a uma falha no meio."""
+    md.write_review_file([_decisao(111, 222, md.SKIP)], md.REVIEW_FILE)
+    antes = md.REVIEW_FILE.read_bytes()
+
+    def explode(*a, **k):
+        raise OSError("disco cheio")
+
+    monkeypatch.setattr(md.os, "replace", explode)
+    with pytest.raises(OSError):
+        md.write_review_file([_decisao(1, 2, md.PENDING)], md.REVIEW_FILE)
+    assert md.REVIEW_FILE.read_bytes() == antes
+    assert not md.REVIEW_FILE.with_name(md.REVIEW_FILE.name + ".tmp").exists()
+
+
+@pytest.mark.parametrize("kwargs,trecho", [
+    ({"review": True, "refresh_review_file": True}, "pick one"),
+    ({"review": True, "apply_reviewed": True}, "pick one"),
+    ({"refresh_review_file": True, "apply_reviewed": True}, "pick one"),
+    ({"dry_run": True, "refresh_review_file": True}, "contradict"),
+    ({"dry_run": True, "apply_reviewed": True}, "contradict"),
+])
+def test_combinacoes_incompativeis_sao_recusadas(ligacao, capsys, kwargs, trecho):
+    assert md.run(**kwargs) == 2
+    assert trecho in capsys.readouterr().out
+    assert ligacao.escritas == []
+
+
 def test_apply_reviewed_nao_funde(ligacao, capsys):
     md.write_review_file([_decisao(NICOLAS, NIC, "pending")], md.REVIEW_FILE)
     codigo = md.run(apply_reviewed=True)
@@ -140,7 +215,7 @@ def test_nenhuma_heuristica_de_prefixo_funde(ligacao):
     O candidato tem `LEFT(first,4)` coincidente — era o que a versão antiga
     chamava de fusão segura e aplicava sozinha.
     """
-    assert md.run() == 0
+    assert md.run(refresh_review_file=True) == 0
     gravado = json.loads(md.REVIEW_FILE.read_text(encoding="utf-8"))
     assert [d["action"] for d in gravado] == [md.PENDING]
     assert ligacao.escritas == []
@@ -189,7 +264,7 @@ def test_merge_com_direcao_explicita_ainda_nao_autoriza(ligacao):
 
 
 def test_candidato_novo_entra_como_pending(ligacao):
-    md.run()
+    md.run(refresh_review_file=True)
     gravado = json.loads(md.REVIEW_FILE.read_text(encoding="utf-8"))
     assert gravado[0]["action"] == md.PENDING
     assert gravado[0]["merge_from"] is None and gravado[0]["merge_into"] is None
@@ -197,7 +272,7 @@ def test_candidato_novo_entra_como_pending(ligacao):
 
 def test_decisao_existente_nao_e_sobrescrita_pela_descoberta(ligacao):
     md.write_review_file([_decisao(111, 222, md.SKIP)], md.REVIEW_FILE)
-    md.run()
+    md.run(refresh_review_file=True)
     gravado = json.loads(md.REVIEW_FILE.read_text(encoding="utf-8"))
     assert gravado[0]["action"] == md.SKIP
 
@@ -289,6 +364,22 @@ def test_ausencia_de_acao_nao_e_aprovacao(ligacao):
     assert "not approval" in str(exc.value)
 
 
+@pytest.mark.parametrize("desde,para", [
+    (True, 2), (1, True), (False, 2), (1, False),
+    ("1", 2), (1, "2"), (0, 2), (1, 0), (-1, 2), (1, -2), (1.0, 2), (1, 2.0),
+])
+def test_direcao_com_tipo_errado_e_rejeitada(ligacao, desde, para):
+    """
+    `True == 1` e `{True, 2} == {1, 2}`, entao comparar a direcao com o par
+    sem checar o tipo aceitaria um booleano como id.
+    """
+    d = _decisao(1, 2, md.PENDING, merge_from=desde, merge_into=para)
+    md.REVIEW_FILE.write_text(json.dumps([d]), encoding="utf-8")
+    with pytest.raises(md.ReviewFileInvalid) as exc:
+        md.read_review_file(md.REVIEW_FILE)
+    assert "positive integer" in str(exc.value)
+
+
 @pytest.mark.parametrize("desde,para", [(1, None), (None, 2), (1, 1), (1, 9), (9, 2)])
 def test_direcao_inconsistente_e_rejeitada(ligacao, desde, para):
     d = _decisao(1, 2, md.PENDING, merge_from=desde, merge_into=para)
@@ -309,7 +400,7 @@ def test_direcao_coerente_e_aceita_mas_nao_aprova(ligacao):
 
 def test_falha_de_leitura_fecha_a_conexao(ligacao):
     md.REVIEW_FILE.write_text("{quebrado", encoding="utf-8")
-    assert md.run() == 2
+    assert md.run(refresh_review_file=True) == 2
     assert all(c.fechada for c in ligacao.conns)
     assert all(c.commits == 0 for c in ligacao.conns)
     assert ligacao.escritas == []
