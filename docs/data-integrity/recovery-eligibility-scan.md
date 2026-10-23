@@ -8,6 +8,14 @@ recuperaria?**
 batendo com o log em todos os carros, que é o critério extra para a próxima
 rodada de ensaios.
 
+> **Revisto pela PR #55: 40 das 50.** A proposta do §3 — admitir um carro
+> publicado com `LAPS = 0` e status de não-largada ou não-classificação —
+> foi implementada, e as dez sessões bloqueadas apenas por esse motivo
+> passaram. **Nenhuma outra mudou de estado**: as 7 com número em vários
+> `car_id` e as 3 sem voltas continuam bloqueadas. Evidência em
+> [zero-lap-recovery-rehearsals.md](zero-lap-recovery-rehearsals.md) §2.
+> As contagens abaixo ficam como esta varredura as mediu.
+
 ---
 
 ## 1. Como a resposta é obtida
@@ -94,6 +102,11 @@ uma só.
 não-classificação poderia dispensar volta correspondente, e as 10 sessões
 passariam a elegíveis — **30 → 40**. É uma mudança no recuperador, com a sua
 própria decisão, e **não foi implementada aqui**.
+
+> **Implementada pela PR #55**, com as condições estreitadas e 34 testes, a
+> maioria negativos. `MEASURED`: as dez passaram, o total foi a **40**, e
+> nenhuma outra sessão mudou de estado. Uma das dez — a sessão 999 — foi
+> recuperada no ambiente descartável como terceiro ensaio daquela PR.
 
 ---
 
