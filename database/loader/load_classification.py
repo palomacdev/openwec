@@ -518,12 +518,27 @@ def upsert_driver(cur, d: dict) -> tuple[int | None, DriverOutcome]:
     second row for the same person. Measured: 1.079 names held by 2.219
     rows, 820 of those groups created in different ingestion windows.
 
-    A single normalised match is reused, and left exactly as it is: the row
-    is not renamed and its country or identifiers are not overwritten, since
-    nothing here establishes which spelling is the right one. Several
-    matches decide nothing, so the row is created as before rather than
-    guessing — that keeps the behaviour no worse than today and leaves the
-    ambiguity visible in the count.
+    Answers for all five outcomes, and creates a row for only one of them:
+
+      EXACT_NAME           the row exists under this very spelling; it keeps
+                           the update path it always had, so the country and
+                           the identifiers the source carries still enrich it
+      BY_NORMALIZED_NAME   one row, and only one, carries the same name in
+                           normalised form: it is reused and left exactly as
+                           it is — not renamed, nothing overwritten, since
+                           nothing here establishes which spelling is right
+      MULTIPLE_CANDIDATES  several rows carry it. No row is created and none
+                           is chosen: adding one would deepen the very
+                           duplication this guards against, and choosing one
+                           would be choosing by id. The ambiguity is returned
+                           and the caller counts it
+      NOT_FOUND            no row carries this name in any spelling, so it is
+                           a driver this table has not seen: created
+      NO_NAME              the source carried no name: nothing is created
+
+    Measured over the classification corpus: 1.935 names resolve exactly,
+    162 reuse a row that would otherwise have become a duplicate, 15 are
+    created, and 2 are refused.
     """
     encontrado, desfecho = resolve_driver_id(cur, d["first_name"], d["last_name"])
 

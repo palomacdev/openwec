@@ -309,6 +309,17 @@ invalidado à mão no caso comum — em particular, a suíte de testes não cham
 mais invalidação nenhuma na sua fixture, e é um teste que verifica essa
 propriedade.
 
+**O que o índice deliberadamente não faz.** Um fold é um retrato. Linhas que
+outra conexão escreva **durante** uma execução não são vistas por ela: o
+fold é lido uma vez, no início, e só o que a própria conexão escrever depois
+é acrescentado. Descartá-lo no meio releria a tabela e as alcançaria, e nada
+faz isso — uma execução de carregador não divide a tabela com outro escritor.
+
+Portanto **não há promessa de sincronização entre conexões simultâneas**, e
+nenhuma é feita em outro lugar. O que protege a tabela contra duas execuções
+ao mesmo tempo não é o fold, e sim `UNIQUE (first_name, last_name)`, que
+decide a corrida no `ON CONFLICT` do `upsert_driver` — ver §6.5.
+
 A primeira versão desta PR usava um único índice global de processo, que
 sobrevivia a conexões e execuções e dependia de os testes o limparem.
 Corrigido.

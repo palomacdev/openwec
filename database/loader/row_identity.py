@@ -409,6 +409,22 @@ def choose_driver(
 #
 # The entry disappears when the connection is collected, so nothing has to
 # be invalidated by hand for the common case.
+#
+# What it deliberately does not do
+# --------------------------------
+# A fold is a snapshot. Rows another connection writes **while a run is
+# under way** are not seen by that run: the fold is read once, at its start,
+# and only what this connection writes afterwards is added to it. Dropping
+# it mid-run would re-read the table and pick them up, and nothing does
+# that, because a loader run is not expected to share the table with a
+# writer.
+#
+# So this promises no synchronisation between simultaneous connections, and
+# none is claimed elsewhere. What protects the table against two runs at
+# once is not the fold but `UNIQUE (first_name, last_name)`, which decides
+# the race in `upsert_driver`'s `ON CONFLICT`. Two runs that bring different
+# spellings of one person can still create two rows; closing that would take
+# a unique index over the normalised form, which is a migration.
 _DRIVER_INDEX: "weakref.WeakKeyDictionary[Any, dict[str, list[DriverCandidate]]]" = (
     weakref.WeakKeyDictionary()
 )
