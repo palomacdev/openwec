@@ -567,7 +567,7 @@ sirva de caso de aceitação.
 
 | # | risco | severidade | evidência |
 |---|---|---|---|
-| 1 | `--apply-reviewed` fundir os 15 pares pré-aprovados, incluindo `Nic`/`Nicolas` | **alta** | `needs_review.json` commitado com `"action": "merge"` em todos |
+| 1 | `--apply-reviewed` fundir os 15 pares pré-aprovados, incluindo `Nic`/`Nicolas` | ~~**alta**~~ **mitigado (#47)** | `needs_review.json` commitado com `"action": "merge"` em todos — reescrito como `"pending"`, e aplicar está bloqueado |
 | 2 | Fundir homônimos | **alta** | 651 grupos sem nenhuma evidência além do nome, mais 15 linhas sem corroboração dentro dos 9 grupos parciais |
 | 2b | Tratar um grupo parcialmente corroborado como se fosse inteiro | **alta** | é o que produziria os 604; as linhas em conflito são justamente as não corroboradas |
 | 3 | `merge_drivers.py` escolher o sobrevivente por "tem país" | média | país diverge entre linhas da mesma pessoa (PR #45) |
@@ -633,6 +633,14 @@ A quarta e a sexta são as que pegam uma fusão a mais do que o aprovado.
 ## 12. Próximos passos propostos
 
 Nenhum está autorizado.
+
+> **Mitigado pela PR #47.** O risco 1 foi neutralizado: `merge_drivers.py`
+> não contém mais as instruções que redirecionavam referências e apagavam
+> linhas, `--apply-reviewed` recusa com saída 2, e o `needs_review.json`
+> versionado foi reescrito em UTF-8 com `"action": "pending"` nos 15 pares.
+> Os números desta auditoria **não mudam** — ela mediu o acervo, que
+> continua intacto. O que mudou é que nenhum caminho do script alcança uma
+> fusão.
 
 1. **Neutralizar o risco 1 primeiro, numa PR própria — *Driver Merge Safety
    Guard*.** Trocar o default do `needs_review.json` para `"skip"`, ou
