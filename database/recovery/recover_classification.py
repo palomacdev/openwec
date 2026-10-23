@@ -30,16 +30,28 @@ spelling difference between two sources is not evidence that one is wrong.
 
 ## The guard
 
-Three gates, and all three have to open:
+Five gates, and all five have to open. There is no flag that skips one.
 
   1. `OPENWEC_RECOVERY_IS_DISPOSABLE` declared in the environment;
   2. the target is not the host and port the project reads as historical;
-  3. the target carries the marker table a rehearsal copy is given by hand.
+  3. the target carries the marker table a rehearsal copy is given by hand;
+  4. that table holds exactly one row, and its `rehearsal_id` is the one the
+     environment names in `RECOVERY_REHEARSAL_ID`;
+  5. the `system_identifier` recorded in that row is the one the cluster
+     reports now.
 
-The third is the one that cannot be set by accident from a shell history: it
-has to be created inside the database being written to, which is a deliberate
-act on a copy. Connection settings come from `RECOVERY_DB_*` only — never
-from `database.db`, so no default can point this at the real instance.
+The first three can all be true of a database that merely looks like the
+rehearsal: a name, a variable and a table are things anyone can arrange. The
+last two bind the write to **one** cluster. `system_identifier` comes from
+`pg_control_system()`; it is minted by `initdb` and is not carried by a dump,
+so restoring this rehearsal into the historical cluster — or into production
+— brings the row along and the identifier still disagrees. The identity is
+recorded, not derived from any name, port or variable.
+
+Every check fails closed. A missing table, a missing variable, more than one
+row, a NULL column or a value that cannot be read is a refusal, never a pass.
+Connection settings come from `RECOVERY_DB_*` only — never from
+`database.db`, so no default can point this at the real instance.
 """
 from __future__ import annotations
 
@@ -63,7 +75,39 @@ from load_classification import (  # noqa: E402
 from row_identity import DriverOutcome  # noqa: E402
 
 DISPOSABLE_ENV = "OPENWEC_RECOVERY_IS_DISPOSABLE"
+REHEARSAL_ID_ENV = "RECOVERY_REHEARSAL_ID"
 MARKER_TABLE = "recovery_rehearsal"
+
+# The table the operator creates inside the copy, by hand, once. It records
+# the cluster it was created in, reading `pg_control_system()` at that moment,
+# so the identity cannot be written from outside without being inside. Nothing
+# in this module ever creates or writes it: `--print-marker-sql` hands the
+# statement to a person, and a person runs it where they mean to.
+MARKER_DDL = f"""CREATE TABLE {MARKER_TABLE} (
+    rehearsal_id      text        NOT NULL,
+    system_identifier text        NOT NULL,
+    declared_at       timestamptz NOT NULL DEFAULT now(),
+    note              text        NOT NULL
+);
+INSERT INTO {MARKER_TABLE} (rehearsal_id, system_identifier, note)
+SELECT '{{rehearsal_id}}', system_identifier::text, '{{note}}'
+  FROM pg_control_system();"""
+
+
+def marker_sql(rehearsal_id: str | None = None, note: str = "copia descartavel") -> str:
+    """
+    The statement that declares a copy, with an id that is only hex.
+
+    The id is generated here rather than chosen, and it is checked before it
+    is interpolated: a value that is not hexadecimal never reaches the SQL.
+    """
+    import uuid
+    rehearsal_id = rehearsal_id or uuid.uuid4().hex
+    if not all(c in "0123456789abcdef" for c in rehearsal_id.lower()):
+        raise RecoveryBlocked("o identificador do ensaio tem de ser hexadecimal")
+    if "'" in note or "\\" in note:
+        raise RecoveryBlocked("a nota nao pode conter aspas nem barras")
+    return MARKER_DDL.format(rehearsal_id=rehearsal_id, note=note)
 
 
 class RecoveryBlocked(Exception):
@@ -120,9 +164,58 @@ def refusal(cfg: dict, cur) -> str | None:
                 "do projeto")
 
     cur.execute("SELECT to_regclass(%s)", (f"public.{MARKER_TABLE}",))
-    if cur.fetchone()[0] is None:
+    linha = cur.fetchone()
+    if not linha or linha[0] is None:
         return (f"o alvo nao tem a tabela {MARKER_TABLE}, que so uma copia "
                 "descartavel recebe")
+
+    return identity_refusal(cur)
+
+
+def identity_refusal(cur) -> str | None:
+    """
+    Whether this is **the** rehearsal copy, and not merely one that looks it.
+
+    Two values have to agree, and neither is a name, a port or a flag. The
+    first is the id the environment names and the copy stores: a database
+    that was never declared for this rehearsal does not hold it. The second
+    is the cluster's `system_identifier`, minted by `initdb` and not carried
+    by a dump — so a copy of this marker restored into the historical
+    cluster, or into production, arrives with an identifier that no longer
+    matches what it recorded.
+
+    Anything unreadable is a refusal. There is no argument that skips this.
+    """
+    declarado = os.environ.get(REHEARSAL_ID_ENV, "").strip()
+    if not declarado:
+        return f"{REHEARSAL_ID_ENV} nao declarado"
+
+    try:
+        cur.execute(f"""
+            SELECT m.rehearsal_id, m.system_identifier, c.system_identifier::text
+              FROM {MARKER_TABLE} m, pg_control_system() c
+        """)
+        linhas = cur.fetchall()
+    except Exception as exc:                               # pragma: no cover
+        return f"a identidade do alvo nao pode ser lida: {exc}"
+
+    if not linhas:
+        return f"{MARKER_TABLE} esta vazia: o alvo nao declarou identidade"
+    if len(linhas) > 1:
+        return (f"{MARKER_TABLE} tem {len(linhas)} linhas; a identidade do "
+                "alvo tem de ser uma so")
+
+    gravado_id, gravado_cluster, cluster_atual = linhas[0]
+    if not gravado_id or not gravado_cluster:
+        return f"{MARKER_TABLE} tem identidade incompleta"
+
+    if str(gravado_id) != declarado:
+        return (f"a identidade declarada em {REHEARSAL_ID_ENV} nao e a que o "
+                "alvo guarda")
+
+    if not cluster_atual or str(gravado_cluster) != str(cluster_atual):
+        return ("o cluster do alvo nao e aquele em que esta identidade foi "
+                "criada")
 
     return None
 
@@ -244,6 +337,33 @@ def plan_recovery(cur, session_id: int, rows: list[dict]) -> Plan:
     return plano
 
 
+def assert_complete_match(plan: Plan) -> None:
+    """
+    A partial match is not a smaller recovery; it is a different session.
+
+    If the source publishes a car the lap log does not know, writing the rest
+    would leave that car out of a classification presented as complete. If
+    the lap log knows a car the source does not publish, the delete would
+    take away its result and put nothing back. Either way the two sides are
+    not describing the same session, and which one is wrong is not something
+    this routine can tell. It names the numbers and stops.
+
+    `--dry-run` reports the same lists without raising: finding out is
+    exactly what it is for.
+    """
+    problemas = []
+    if plan.source_without_laps:
+        problemas.append(
+            "publicados sem voltas no banco: "
+            + ", ".join(sorted(plan.source_without_laps)))
+    if plan.laps_without_source:
+        problemas.append(
+            "com voltas no banco e sem linha publicada: "
+            + ", ".join(sorted(plan.laps_without_source)))
+    if problemas:
+        raise RecoveryBlocked("pareamento incompleto — " + "; ".join(problemas))
+
+
 # ── The write ────────────────────────────────────────────────
 
 CAR_FILLABLE = ("vehicle", "car_class", "car_group", "tires")
@@ -332,7 +452,14 @@ def drop_lap_shaped_results(cur, session_id: int, keep: list[int]) -> tuple[int,
 
 def recover_session(cur, session_id: int, rows: list[dict], series_key: str,
                     plan: Plan) -> dict:
-    """Applies the plan. The caller owns the transaction."""
+    """
+    Applies the plan. The caller owns the transaction.
+
+    The completeness check is here, on the write path, rather than in the
+    caller: a plan with an unmatched number on either side never reaches a
+    DELETE, whoever calls this.
+    """
+    assert_complete_match(plan)
     keep = sorted(plan.matched.values())
 
     results_removidos, cars_removidos = drop_lap_shaped_results(
@@ -423,6 +550,10 @@ def run(session_id: int, csv_path: Path, series_key: str,
 
             if dry_run:
                 relatorio["modo"] = "dry-run — nada foi escrito"
+                try:
+                    assert_complete_match(plano)
+                except RecoveryBlocked as exc:
+                    relatorio["recusaria_a_escrita"] = str(exc)
                 conn.rollback()
                 return relatorio
 
@@ -431,18 +562,30 @@ def run(session_id: int, csv_path: Path, series_key: str,
             relatorio["depois"] = session_state(cur, session_id).as_dict()
         conn.commit()
         return relatorio
+    except BaseException:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[1])
-    ap.add_argument("--session-id", type=int, required=True)
-    ap.add_argument("--csv", type=Path, required=True,
+    ap.add_argument("--session-id", type=int)
+    ap.add_argument("--csv", type=Path,
                     help="classification published for this session")
     ap.add_argument("--series", default="LEMANSCUP")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--print-marker-sql", action="store_true",
+                    help="print the statement that declares a copy, and exit")
     args = ap.parse_args()
+
+    if args.print_marker_sql:
+        print(marker_sql())
+        return 0
+
+    if args.session_id is None or args.csv is None:
+        ap.error("--session-id e --csv sao obrigatorios")
 
     try:
         relatorio = run(args.session_id, args.csv, args.series, args.dry_run)

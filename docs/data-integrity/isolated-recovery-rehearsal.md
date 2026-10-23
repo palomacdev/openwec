@@ -13,7 +13,7 @@ descartável do banco histórico. **Nada foi escrito no banco histórico.**
 |---|---|---|---|---|
 | `openwec-db` | `timescale/timescaledb:latest-pg16` | 5433 | **o banco histórico**: é o endereço de `DB_CONFIG` e de `.env`, e é onde as PRs #43–#52 mediram | **somente leitura** (`pg_dump`, `SELECT`) |
 | `openwec-test-db` | mesma imagem, digest `87f39af0…` | nenhuma | criado em 2026-10-21, banco `openwec_test`, volume `openwec_test_db_data`. Nenhum arquivo do repositório o menciona | **não tocado, não iniciado** |
-| `openwec-recovery-rehearsal` | mesmo digest de `openwec-db` | 5455 | criado para este ensaio, volume `openwec_rehearsal_data` | **o alvo das escritas** |
+| `openwec-recovery-rehearsal` | mesmo digest de `openwec-db` | 5455 | criado para este ensaio, volume `openwec_rehearsal_data`, cluster `7699915985261658146` | **o alvo das escritas** |
 
 `DERIVED`: `openwec-test-db` não foi usado. O escopo pedia para não presumir
 que ele fosse descartável, e nada do que foi medido estabelece que seja — seu
@@ -193,20 +193,22 @@ a armazenada esteja errada.
 
 ## 6. Idempotência
 
-`MEASURED`, três execuções seguidas da mesma recuperação:
+`MEASURED`, quatro execuções da mesma recuperação — a quarta já com os dois
+portões acrescentados na revisão da PR:
 
-| | execução 1 | execução 2 | execução 3 |
-|---|---:|---:|---:|
-| `results` removidas | 3.080 | **0** | 0 |
-| `cars` removidos | 3.080 | **0** | 0 |
-| colunas de `cars` preenchidas | 56 | **0** | 0 |
-| `results` gravadas | 28 | 28 | 28 |
-| `result_drivers` ao final | 54 | 54 | 54 |
+| | execução 1 | 2 | 3 | 4 |
+|---|---:|---:|---:|---:|
+| `results` removidas | 3.080 | **0** | 0 | 0 |
+| `cars` removidos | 3.080 | **0** | 0 | 0 |
+| colunas de `cars` preenchidas | 56 | **0** | 0 | 0 |
+| `results` gravadas | 28 | 28 | 28 | 28 |
+| `result_drivers` ao final | 54 | 54 | 54 | 54 |
 
 `MEASURED`: digest do conteúdo das 28 linhas — id, carro, posição, status,
-voltas, tempos e pilotos — **idêntico** após a 2ª e a 3ª execução
+voltas, tempos e pilotos — **idêntico** da 2ª à 4ª execução
 (`4e33590b996c2786ff1413ac70057764`). As contagens globais das 14 tabelas
-também são idênticas entre a 2ª e a 3ª.
+também são idênticas entre a 2ª e a 3ª, e o digest das outras 5.424 sessões
+segue `6642dbbe3be5e96076b5c9fc386b13f4` depois da 4ª.
 
 ---
 
@@ -262,10 +264,12 @@ docker run -d --name openwec-recovery-rehearsal \
 docker exec -i openwec-recovery-rehearsal pg_restore -U openwec -d openwec \
   --no-owner --no-privileges < openwec_historical.dump
 
-docker exec openwec-recovery-rehearsal psql -U openwec -d openwec -c \
-  "CREATE TABLE recovery_rehearsal (declared_at timestamptz NOT NULL DEFAULT now(), note text NOT NULL)"
+# A identidade do ensaio: o comando imprime, uma pessoa executa onde quer
+python -m database.recovery.recover_classification --print-marker-sql \
+  | docker exec -i openwec-recovery-rehearsal psql -U openwec -d openwec
 
 OPENWEC_RECOVERY_IS_DISPOSABLE=1 \
+RECOVERY_REHEARSAL_ID=<o id impresso acima> \
 RECOVERY_DB_HOST=127.0.0.1 RECOVERY_DB_PORT=5455 \
 RECOVERY_DB_NAME=openwec RECOVERY_DB_USER=openwec \
 RECOVERY_DB_PASSWORD=rehearsal_only \
@@ -276,19 +280,70 @@ python -m database.recovery.recover_classification \
 Para descartar: `docker rm -f openwec-recovery-rehearsal && docker volume rm
 openwec_rehearsal_data`.
 
-### 9.1 As três recusas, verificadas
+### 9.1 Os cinco portões, verificados no ambiente real
 
-`MEASURED`, cada uma devolvendo saída 2 sem abrir transação:
+`MEASURED`, cada um devolvendo saída 2 sem escrever nada:
 
 ```
 sem OPENWEC_RECOVERY_IS_DISPOSABLE
-  → BLOQUEADO: OPENWEC_RECOVERY_IS_DISPOSABLE nao declarado
+  → OPENWEC_RECOVERY_IS_DISPOSABLE nao declarado
 apontando para 127.0.0.1:5433
-  → BLOQUEADO: o alvo 127.0.0.1:5433 e o endereco historico do projeto
+  → o alvo 127.0.0.1:5433 e o endereco historico do projeto
 alvo sem a tabela recovery_rehearsal
-  → BLOQUEADO: o alvo nao tem a tabela recovery_rehearsal, que so uma copia
+  → o alvo nao tem a tabela recovery_rehearsal, que so uma copia
     descartavel recebe
+sem RECOVERY_REHEARSAL_ID
+  → RECOVERY_REHEARSAL_ID nao declarado
+RECOVERY_REHEARSAL_ID com outro valor
+  → a identidade declarada em RECOVERY_REHEARSAL_ID nao e a que o alvo guarda
+identidade gravada apontando para outro cluster
+  → o cluster do alvo nao e aquele em que esta identidade foi criada
 ```
+
+### 9.2 Por que o `system_identifier` é prova e o nome não é
+
+`MEASURED`, os dois clusters:
+
+| cluster | `system_identifier` |
+|---|---|
+| `openwec-recovery-rehearsal` (a cópia) | `7699915985261658146` |
+| `openwec-db` (o histórico) | `7642299396037144610` |
+
+`DERIVED`: o valor é cunhado pelo `initdb` e **não viaja em dump nenhum**.
+A linha de identidade da cópia guarda o do seu próprio cluster, lido de
+dentro, no momento da declaração. Restaurar esta cópia dentro do cluster
+histórico — ou da produção — leva a linha junto, e o identificador deixa de
+bater.
+
+A recusa foi demonstrada assim, literalmente: gravando na linha de
+identidade o `system_identifier` **do histórico** e executando. Saída 2,
+`o cluster do alvo nao e aquele em que esta identidade foi criada`. A
+identidade foi restaurada em seguida.
+
+`DERIVED`: não existe argumento, variável ou flag que pule essa verificação.
+`identity_refusal` recebe apenas um cursor, e um teste afirma isso sobre a
+própria assinatura da função.
+
+### 9.3 Pareamento incompleto não escreve
+
+`MEASURED`, executando a sessão 2226 com a classificação de **Monza** como
+fonte — 4 números coincidem, 1 publicado não tem voltas, 24 com voltas não
+estão publicados:
+
+```
+--dry-run   exibe as duas listas e acrescenta
+            recusaria_a_escrita: pareamento incompleto — publicados sem
+            voltas no banco: 9; com voltas no banco e sem linha
+            publicada: 14, 17, 2, 20, …
+modo escrita  → saida 2, nenhuma instrucao enviada
+```
+
+`MEASURED`: o digest da sessão 2226 **não mudou** depois da tentativa —
+`4e33590b996c2786ff1413ac70057764`. Sem a recusa, a fonte errada teria
+apagado o resultado de 24 carros e reposto 4.
+
+`DERIVED`: a verificação está na função que escreve, não em volta dela, de
+modo que nenhum chamador alcança um `DELETE` por esquecer de checar antes.
 
 ---
 

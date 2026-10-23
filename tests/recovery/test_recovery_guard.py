@@ -20,12 +20,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from database.recovery.recover_classification import (  # noqa: E402
     DISPOSABLE_ENV,
     MARKER_TABLE,
+    REHEARSAL_ID_ENV,
     Plan,
     RecoveryBlocked,
+    assert_complete_match,
     assert_writable,
     drop_lap_shaped_results,
     fill_car_gaps,
+    identity_refusal,
+    marker_sql,
     plan_recovery,
+    recover_session,
     refusal,
     target_config,
     team_divergence,
@@ -33,6 +38,13 @@ from database.recovery.recover_classification import (  # noqa: E402
 
 ALVO = {"host": "127.0.0.1", "port": 5455, "dbname": "openwec",
         "user": "openwec", "password": "x"}
+
+ID = "a1b2c3d4"
+CLUSTER = "7461923100000000001"
+
+# to_regclass answers first, then the identity query.
+MARCA = [(f"public.{MARKER_TABLE}",)]
+IDENTIDADE = [(ID, CLUSTER, CLUSTER)]
 
 
 class CursorFalso:
@@ -69,7 +81,16 @@ def ambiente(monkeypatch):
                         ("RECOVERY_DB_PASSWORD", "x")):
         monkeypatch.setenv(nome, valor)
     monkeypatch.setenv(DISPOSABLE_ENV, "1")
+    monkeypatch.setenv(REHEARSAL_ID_ENV, ID)
     return monkeypatch
+
+
+@pytest.fixture
+def longe_do_historico(monkeypatch):
+    """Pins the historical endpoint so gate 2 is not what a test measures."""
+    import database.db as db
+    monkeypatch.setitem(db.DB_CONFIG, "host", "127.0.0.1")
+    monkeypatch.setitem(db.DB_CONFIG, "port", 5433)
 
 
 # ── Where the connection comes from ──────────────────────────
@@ -110,39 +131,124 @@ def test_a_configuracao_do_projeto_nao_serve_de_padrao(monkeypatch):
 
 def test_sem_declaracao_nao_se_escreve(ambiente):
     ambiente.delenv(DISPOSABLE_ENV, raising=False)
-    cur = CursorFalso([[(f"public.{MARKER_TABLE}",)]])
+    cur = CursorFalso([MARCA, IDENTIDADE])
     assert DISPOSABLE_ENV in refusal(ALVO, cur)
 
 
-def test_o_endereco_historico_e_recusado(ambiente, monkeypatch):
-    import database.db as db
-    monkeypatch.setitem(db.DB_CONFIG, "host", "127.0.0.1")
-    monkeypatch.setitem(db.DB_CONFIG, "port", 5433)
-    cur = CursorFalso([[(f"public.{MARKER_TABLE}",)]])
+def test_o_endereco_historico_e_recusado(ambiente, longe_do_historico):
+    cur = CursorFalso([MARCA, IDENTIDADE])
     historico = dict(ALVO, port=5433)
     assert "historico" in refusal(historico, cur)
 
 
-def test_sem_a_marca_nao_se_escreve(ambiente):
+def test_sem_a_marca_nao_se_escreve(ambiente, longe_do_historico):
     cur = CursorFalso([[(None,)]])
     assert MARKER_TABLE in refusal(ALVO, cur)
 
 
-def test_com_as_tres_abertas_o_alvo_e_aceito(ambiente, monkeypatch):
-    import database.db as db
-    monkeypatch.setitem(db.DB_CONFIG, "port", 5433)
-    cur = CursorFalso([[(f"public.{MARKER_TABLE}",)]])
-    assert refusal(ALVO, cur) is None
-    assert_writable(ALVO, CursorFalso([[(f"public.{MARKER_TABLE}",)]]))
+def test_com_as_cinco_abertas_o_alvo_e_aceito(ambiente, longe_do_historico):
+    assert refusal(ALVO, CursorFalso([MARCA, IDENTIDADE])) is None
+    assert_writable(ALVO, CursorFalso([MARCA, IDENTIDADE]))
 
 
-def test_a_marca_e_consultada_sem_ser_criada(ambiente, monkeypatch):
-    import database.db as db
-    monkeypatch.setitem(db.DB_CONFIG, "port", 5433)
-    cur = CursorFalso([[(f"public.{MARKER_TABLE}",)]])
+def test_a_marca_e_consultada_sem_ser_criada(ambiente, longe_do_historico):
+    cur = CursorFalso([MARCA, IDENTIDADE])
     refusal(ALVO, cur)
     assert "CREATE" not in cur.sql.upper()
+    assert "INSERT" not in cur.sql.upper()
+    assert "UPDATE" not in cur.sql.upper()
     assert "to_regclass" in cur.sql
+
+
+# ── The identity of the target, which no name can supply ─────
+
+def test_sem_identidade_declarada_nao_se_escreve(ambiente):
+    ambiente.delenv(REHEARSAL_ID_ENV, raising=False)
+    cur = CursorFalso([IDENTIDADE])
+    assert REHEARSAL_ID_ENV in identity_refusal(cur)
+
+
+def test_a_identidade_vazia_no_alvo_nao_se_escreve(ambiente):
+    """The table exists and declares nothing: that is not a declaration."""
+    cur = CursorFalso([[]])
+    assert "nao declarou identidade" in identity_refusal(cur)
+
+
+def test_a_identidade_divergente_e_recusada(ambiente):
+    cur = CursorFalso([[("outro-ensaio", CLUSTER, CLUSTER)]])
+    motivo = identity_refusal(cur)
+    assert REHEARSAL_ID_ENV in motivo and "nao e a que o alvo guarda" in motivo
+
+
+def test_o_cluster_incompativel_e_recusado(ambiente):
+    """
+    The case a copied marker produces.
+
+    `system_identifier` is minted by `initdb` and travels in no dump, so a
+    rehearsal restored into the historical cluster — or into production —
+    arrives carrying a row whose identifier the cluster does not answer to.
+    """
+    cur = CursorFalso([[(ID, CLUSTER, "9999999999999999999")]])
+    assert "nao e aquele em que esta identidade foi criada" in identity_refusal(cur)
+
+
+def test_mais_de_uma_identidade_e_recusada(ambiente):
+    cur = CursorFalso([[(ID, CLUSTER, CLUSTER), ("outro", CLUSTER, CLUSTER)]])
+    assert "tem de ser uma so" in identity_refusal(cur)
+
+
+@pytest.mark.parametrize("linha", [
+    (None, CLUSTER, CLUSTER),
+    (ID, None, CLUSTER),
+    ("", CLUSTER, CLUSTER),
+])
+def test_a_identidade_incompleta_e_recusada(ambiente, linha):
+    assert "incompleta" in identity_refusal(CursorFalso([[linha]]))
+
+
+def test_o_cluster_sem_resposta_e_recusado(ambiente):
+    cur = CursorFalso([[(ID, CLUSTER, None)]])
+    assert "nao e aquele em que esta identidade foi criada" in identity_refusal(cur)
+
+
+def test_a_identidade_completa_e_aceita(ambiente):
+    assert identity_refusal(CursorFalso([IDENTIDADE])) is None
+
+
+def test_nao_ha_argumento_que_pule_a_identidade():
+    """
+    The refusal depends on nothing the caller passes.
+
+    `identity_refusal` takes only a cursor: there is no flag, no keyword and
+    no environment value that turns it off, which is why `refusal` can end
+    with it rather than around it.
+    """
+    import inspect
+    assinatura = inspect.signature(identity_refusal)
+    assert list(assinatura.parameters) == ["cur"]
+
+
+# ── The statement that declares a copy ───────────────────────
+
+def test_a_marca_e_declarada_lendo_o_proprio_cluster():
+    """The identifier is read inside the target, not supplied from outside."""
+    sql = marker_sql(ID)
+    assert "FROM pg_control_system()" in sql
+    assert f"'{ID}'" in sql
+
+
+def test_um_identificador_fora_do_hexadecimal_e_recusado():
+    with pytest.raises(RecoveryBlocked):
+        marker_sql("'; DROP TABLE results; --")
+
+
+def test_uma_nota_com_aspas_e_recusada():
+    with pytest.raises(RecoveryBlocked):
+        marker_sql(ID, note="o'brien")
+
+
+def test_cada_chamada_gera_um_identificador_novo():
+    assert marker_sql() != marker_sql()
 
 
 # ── Matching, and what it refuses to guess ───────────────────
@@ -197,6 +303,53 @@ def test_a_linha_sem_numero_interrompe(ambiente):
     with pytest.raises(RecoveryBlocked) as exc:
         plan_recovery(cur, 1, linhas("3", ""))
     assert "sem NUMBER" in str(exc.value)
+
+
+# ── A partial match stops the write ──────────────────────────
+
+def test_o_pareamento_completo_passa():
+    assert_complete_match(Plan(matched={"3": 10}))
+
+
+def test_o_publicado_sem_voltas_impede_a_escrita():
+    with pytest.raises(RecoveryBlocked) as exc:
+        assert_complete_match(Plan(matched={"3": 10},
+                                   source_without_laps=["88", "12"]))
+    assert "pareamento incompleto" in str(exc.value)
+    assert "12, 88" in str(exc.value)
+
+
+def test_as_voltas_sem_publicacao_impedem_a_escrita():
+    with pytest.raises(RecoveryBlocked) as exc:
+        assert_complete_match(Plan(matched={"3": 10},
+                                   laps_without_source={"88": 12}))
+    assert "sem linha publicada" in str(exc.value)
+    assert "88" in str(exc.value)
+
+
+def test_os_dois_lados_aparecem_na_mesma_recusa():
+    with pytest.raises(RecoveryBlocked) as exc:
+        assert_complete_match(Plan(matched={"3": 10},
+                                   source_without_laps=["88"],
+                                   laps_without_source={"12": 99}))
+    motivo = str(exc.value)
+    assert "publicados sem voltas no banco: 88" in motivo
+    assert "sem linha publicada: 12" in motivo
+
+
+def test_a_escrita_para_antes_de_qualquer_delete():
+    """
+    The check sits on the write path, not around it.
+
+    Whoever calls `recover_session` with an incomplete plan gets a refusal
+    before the first statement, so no DELETE can be reached by skipping the
+    caller that was supposed to check.
+    """
+    cur = CursorFalso()
+    with pytest.raises(RecoveryBlocked):
+        recover_session(cur, 2226, [{"NUMBER": "3"}], "LEMANSCUP",
+                        Plan(matched={"3": 10}, source_without_laps=["88"]))
+    assert cur.executados == []
 
 
 # ── The delete, and what it refuses to reach ─────────────────
