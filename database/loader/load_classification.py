@@ -38,7 +38,10 @@ from pathlib import Path
 from database.db import DB_CONFIG
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from row_identity import SessionOutcome, resolve_session_id  # noqa: E402
+from row_identity import (  # noqa: E402
+    DriverCandidate, DriverOutcome, SessionOutcome,
+    forget_driver_index, remember_driver, resolve_driver_id, resolve_session_id,
+)
 
 
 # ── Config ───────────────────────────────────────────────────
@@ -503,10 +506,54 @@ def upsert_car(cur, number: str, team_id: int, row: dict, series_key: str) -> in
     return inserted[0] if inserted else None
 
 
-def upsert_driver(cur, d: dict) -> int | None:
-    if not d["first_name"] and not d["last_name"]:
-        return None
+def upsert_driver(cur, d: dict) -> tuple[int | None, DriverOutcome]:
+    """
+    The driver row this source name belongs to, creating it if it is new.
 
+    Before creating one, the stored names are consulted in their normalised
+    form. `drivers` is unique on the raw (first_name, last_name), so a row
+    whose name was rewritten afterwards — `normalize_drivers.py` turned
+    "Giedo VAN DER"/"GARDE" into "Giedo"/"Van Der Garde" — no longer matches
+    the spelling the source still carries, and the loader used to insert a
+    second row for the same person. Measured: 1.079 names held by 2.219
+    rows, 820 of those groups created in different ingestion windows.
+
+    Answers for all five outcomes, and creates a row for only one of them:
+
+      EXACT_NAME           the row exists under this very spelling; it keeps
+                           the update path it always had, so the country and
+                           the identifiers the source carries still enrich it
+      BY_NORMALIZED_NAME   one row, and only one, carries the same name in
+                           normalised form: it is reused and left exactly as
+                           it is — not renamed, nothing overwritten, since
+                           nothing here establishes which spelling is right
+      MULTIPLE_CANDIDATES  several rows carry it. No row is created and none
+                           is chosen: adding one would deepen the very
+                           duplication this guards against, and choosing one
+                           would be choosing by id. The ambiguity is returned
+                           and the caller counts it
+      NOT_FOUND            no row carries this name in any spelling, so it is
+                           a driver this table has not seen: created
+      NO_NAME              the source carried no name: nothing is created
+
+    Measured over the classification corpus: 1.935 names resolve exactly,
+    162 reuse a row that would otherwise have become a duplicate, 15 are
+    created, and 2 are refused.
+    """
+    encontrado, desfecho = resolve_driver_id(cur, d["first_name"], d["last_name"])
+
+    if desfecho is DriverOutcome.NO_NAME:
+        return None, desfecho
+    if desfecho is DriverOutcome.BY_NORMALIZED_NAME:
+        return encontrado, desfecho
+    if desfecho is DriverOutcome.MULTIPLE_CANDIDATES:
+        # Creating one more row for a name that already answers to several
+        # would make the duplication worse, and picking one of them would be
+        # picking by id. The result keeps its other drivers; this one is left
+        # unlinked, and counted.
+        return None, desfecho
+
+    # EXACT_NAME keeps the update path it always had; NOT_FOUND creates.
     cur.execute("""
         INSERT INTO drivers (
             first_name, last_name, short_name, country,
@@ -526,7 +573,11 @@ def upsert_driver(cur, d: dict) -> int | None:
         d["imsa_driver_id"], d["imsa_driver_plug_id"],
         d["imsa_driver_rating"],
     ))
-    return cur.fetchone()[0]
+    gravado = cur.fetchone()[0]
+    if desfecho is DriverOutcome.NOT_FOUND:
+        remember_driver(
+            cur, DriverCandidate(gravado, d["first_name"] or "", d["last_name"] or ""))
+    return gravado, desfecho
 
 
 def insert_result(cur, session_id: int, car_id: int, row: dict) -> int | None:
@@ -702,6 +753,8 @@ def process_session(cur, series_key: str, sess: dict, dry_run: bool) -> dict:
 
     is_imsa = (series_key == "IMSA")
     loaded = 0
+    # Drivers left unlinked because the name answers to several rows.
+    pilotos_ambiguos = 0
 
     for row in rows:
         number = row.get("NUMBER", "").strip()
@@ -722,16 +775,24 @@ def process_session(cur, series_key: str, sess: dict, dry_run: bool) -> dict:
         drivers = extract_drivers_imsa(row) if is_imsa else extract_drivers_wec(row)
         driver_ids = []
         for d in drivers:
-            drv_id = upsert_driver(cur, d)
+            drv_id, drv_outcome = upsert_driver(cur, d)
             if drv_id:
                 driver_ids.append((d["slot"], drv_id))
+            elif drv_outcome is DriverOutcome.MULTIPLE_CANDIDATES:
+                pilotos_ambiguos += 1
 
         if driver_ids:
             insert_result_drivers(cur, result_id, driver_ids)
 
         loaded += 1
 
-    return {"status": "ok", "rows": len(rows), "loaded": loaded, "session_id": session_id}
+    if pilotos_ambiguos:
+        print(f"  [AMBIGUOUS DRIVER] {pilotos_ambiguos} drivers left unlinked in "
+              f"{season_raw} / {event_raw} / {session_name}: the name is held by "
+              f"more than one driver row, and nothing says which")
+
+    return {"status": "ok", "rows": len(rows), "loaded": loaded,
+            "session_id": session_id, "ambiguous_drivers": pilotos_ambiguos}
 
 
 OVERRIDE_ENV = "OPENWEC_ALLOW_DUPLICATING_LOADER"
@@ -772,9 +833,13 @@ def run(series_filter: str | None = None, dry_run: bool = False):
 
     conn = psycopg2.connect(**DB_CONFIG)
     cur  = conn.cursor()
+    # A run reads the table for itself: a connection that is still open from
+    # an earlier one must not answer with what it folded then.
+    forget_driver_index(cur)
 
     total = {"sessions": 0, "ok": 0, "no_match": 0, "ambiguous": 0,
-             "contradicted": 0, "empty": 0, "errors": 0, "rows": 0}
+             "contradicted": 0, "empty": 0, "errors": 0, "rows": 0,
+             "ambiguous_drivers": 0}
 
     series_to_run = RAW_DIRS
     if series_filter:
@@ -798,6 +863,7 @@ def run(series_filter: str | None = None, dry_run: bool = False):
                     series_stats["ok"] += 1
                     total["ok"] += 1
                     total["rows"] += result.get("rows", 0)
+                    total["ambiguous_drivers"] += result.get("ambiguous_drivers", 0)
                 elif status == "no_session_match":
                     series_stats["no_match"] += 1
                     total["no_match"] += 1
