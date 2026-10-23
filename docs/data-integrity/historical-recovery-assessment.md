@@ -28,10 +28,25 @@ sete execuções do carregador. Dessas, **83.595 entradas lógicas são
 consolidáveis sem perder nenhum valor**, 156 precisam de uma regra de
 escolha, e 1.235 envolvem identidades competitivas que a fonte não resolve.
 
-Nenhum registro precisa ser apagado para que o acervo fique correto: todas as
-operações previstas são consolidação, re-apontamento e remoção de linhas
-comprovadamente vazias. Nada do que foi medido é perda irreversível de
-informação que a fonte ainda possua.
+**Nenhuma exclusão está autorizada por este documento**, e nenhuma foi
+executada. A remoção controlada das linhas comprovadamente contaminadas é
+**uma das alternativas futuras**, não uma conclusão deste diagnóstico: marcá-
+las, preservá-las intactas ou removê-las são caminhos abertos, e a escolha é
+a decisão 1 do [plano](recovery-plan.md).
+
+Duas afirmações distintas, que não devem ser lidas como uma só:
+
+- **Ausência de perda de informação.** Para as 324.720 linhas contaminadas,
+  medimos que elas não carregam valor nenhum lido da fonte (§3.2) e que o
+  conteúdo de classificação que deveriam ter não existe em `raw/` (§3.4).
+  Removê-las não perderia informação que a fonte ainda possua. Isso é uma
+  constatação sobre o conteúdo.
+- **Ausência de operação `DELETE`.** Nada foi removido, e nada está
+  autorizado a ser. Isso é uma constatação sobre o que foi feito.
+
+A primeira **não implica** a segunda nem a dispensa: que uma remoção não
+perderia informação é argumento a favor de considerá-la, não permissão para
+executá-la.
 
 **Não estamos prontos para executar a recuperação.** Faltam o backup
 verificado (Fase 0 do plano) e cinco decisões humanas listadas em
@@ -265,8 +280,9 @@ novo. Nenhum carro órfão existe, o que significa que **a consolidação de
 `cars` obriga a consolidar `results` junto**; não há linha solta a descartar
 sem consequência.
 
-Os 56.793 citados por `laps` são a interseção que a Fase 3 do plano precisa
-reconciliar antes de qualquer merge.
+Os 56.793 citados por `laps` são a interseção que a Fase 5 do plano precisa
+reconciliar antes de qualquer merge — depois que a Fase 2 tiver aprovado a
+regra para as colisões que esse re-apontamento provoca.
 
 > **Nota de método — duas formulações, mesmo resultado.** Esta seção foi
 > medida duas vezes por formulações diferentes: a varredura única com
@@ -336,6 +352,14 @@ de tupla não é prova, e a ADR 0001 é explícita quanto a isso.
 Todos os 35.045 grupos de `laps` têm exatamente duas linhas. **Não são
 colisões existentes** — a restrição única vale hoje. São colisões que uma
 consolidação por tupla provocaria, e que precisam de regra antes dela.
+
+> **Não está estabelecido que esses pares sejam duplicatas.** O medido é que
+> as duas linhas compartilham sessão, identidade de carro e número da volta.
+> **Se o conteúdo das duas coincide — tempo, setores, velocidade, hora — não
+> foi verificado nesta PR.** Podem ser a mesma volta gravada duas vezes, duas
+> leituras da mesma volta, ou um defeito de numeração na fonte. Essa
+> comparação campo a campo é o entregável da Fase 1 do plano, e sem ela
+> nenhuma das duas linhas pode ser descartada.
 
 ---
 
@@ -485,7 +509,7 @@ colunas de quantidade **não devem ser somadas entre famílias**.
 
 | # | risco | severidade | mitigação |
 |---|---|---|---|
-| 1 | Consolidar `cars` por tupla faz 35.045 linhas de `laps` colidirem e interrompe a operação no meio | alta | reconciliar `laps` antes (Fase 3 do plano) |
+| 1 | Consolidar `cars` por tupla faz 35.045 linhas de `laps` colidirem e interrompe a operação no meio | alta | inventariar os pares (Fase 1) e aprovar a regra de colisão (Fase 2) antes de qualquer re-apontamento |
 | 2 | `cars` contaminados não são identificáveis pela tupla: 42 tuplas aparecem nas duas populações | alta | identificar sempre pela linha de `results` nas 52 sessões |
 | 3 | Remover `cars` contaminados sem re-apontar as voltas órfã 158.275 linhas de `laps` | alta | re-apontar antes de remover |
 | 4 | `status = 'Other'` em 630.869 linhas é default fabricado por `normalize_status("")`, não dado | média | reavaliar a semântica antes que qualquer análise dependa dela |
