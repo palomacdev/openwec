@@ -235,20 +235,85 @@ A grafia exata é consultada primeiro. **Toda volta que resolvia antes
 resolve do mesmo jeito**, inclusive quando as duas grafias existem na
 tabela.
 
-O índice normalizado é dobrado **uma vez por processo**: a forma normalizada
-não é indexável sem migration, e consultá-la por volta faria uma varredura
-da tabela para cada uma das 432.174 voltas sem correspondência exata.
+O índice normalizado é dobrado **uma vez por conexão**, e não por processo:
+a forma normalizada não é indexável sem migration, e consultá-la por volta
+faria uma varredura da tabela para cada uma das 432.174 voltas sem
+correspondência exata. O §6.3 descreve o ciclo de vida.
 
 ### 6.2 `upsert_driver`, em `load_classification.py`
 
-Antes de inserir, consulta a forma normalizada. Uma única correspondência é
-**reaproveitada e deixada como está** — a linha não é renomeada e seu país
-ou identificadores não são sobrescritos, porque nada aqui estabelece qual
-grafia é a certa. Vários candidatos não decidem nada, então a linha é criada
-como antes: recusar perderia a associação, e o comportamento fica **nunca
-pior que o de hoje**.
+Devolve `(id, desfecho)`, como as demais resoluções desde a PR #41, e trata
+os cinco casos:
 
-### 6.3 Cobertura projetada
+| desfecho | o que faz |
+|---|---|
+| `EXACT_NAME` | o caminho de sempre: `INSERT ... ON CONFLICT DO UPDATE` enriquece a linha existente |
+| `BY_NORMALIZED_NAME` | reaproveita a linha única, **sem renomeá-la nem sobrescrever seus atributos** |
+| `MULTIPLE_CANDIDATES` | **não insere e não escolhe**; devolve o motivo, que o carregador conta |
+| `NOT_FOUND` | cria normalmente |
+| `NO_NAME` | não cria |
+
+A primeira versão desta PR caía no `INSERT` quando o desfecho era
+`MULTIPLE_CANDIDATES`, acrescentando mais uma linha a um nome que já
+respondia a várias — isto é, agravando exatamente a duplicação que a PR
+diagnostica. Corrigido.
+
+**O que a recusa custa**, medido sobre os 2.114 pares (nome, sobrenome) dos
+arquivos de classificação, em 88.512 ocorrências:
+
+| desfecho | pares | ocorrências |
+|---|---:|---:|
+| `EXACT_NAME` | 1.935 | 87.655 |
+| `BY_NORMALIZED_NAME` | 162 | 761 |
+| `NOT_FOUND` — criados normalmente | 15 | 88 |
+| **`MULTIPLE_CANDIDATES` — recusados** | **2** | **8** |
+
+Os dois, e os candidatos que os tornam ambíguos:
+
+```
+fonte 'Jean Baptiste' 'SIMMENAUER'        (2 ocorrências)
+   3343  'Jean-Baptiste' 'Simmenauer'
+ 329107  'Jean Baptiste' 'Simmenauer'
+ 334279  'Jean-Baptiste' 'SIMMENAUER'
+
+fonte 'Abdulla ALI' 'AL-KHELAIFI'         (6 ocorrências)
+ 330226  'Abdulla Ali' 'Al-khelaifi'
+ 340610  'Abdulla Ali' 'AL-KHELAIFI'
+```
+
+Os dois são a mesma pessoa em três e duas grafias. Antes, o carregador
+criaria a quarta e a terceira.
+
+**O que se perde:** 8 vínculos piloto↔resultado deixam de ser criados numa
+carga futura. A linha de `results` continua existindo, e os demais pilotos
+do mesmo carro continuam vinculados — a classificação não se perde, só
+aquele vínculo. É o preço de não agravar a duplicação, e está contado.
+
+**O que se ganha:** os 162 pares que hoje criariam uma segunda linha para
+quem já está na tabela passam a reaproveitá-la.
+
+### 6.3 Ciclo de vida do índice
+
+Um fold por conexão, guardado numa `WeakKeyDictionary`. É isso que limita a
+sua vida, e cada limite responde a um risco concreto:
+
+| limite | como |
+|---|---|
+| entre bancos | uma conexão não troca de banco, então um índice nunca responde por outro |
+| entre execuções | uma execução abre a sua conexão e relê a tabela; os dois `run()` chamam `forget_driver_index` ao começar, cobrindo a execução que reaproveita uma conexão aberta |
+| entre conexões | duas conexões nunca compartilham o fold, então uma não serve linhas que a outra escreveu depois |
+| dentro da execução | `remember_driver` mantém visível o que esta conexão acabou de escrever |
+
+A entrada **desaparece quando a conexão é coletada**, então nada precisa ser
+invalidado à mão no caso comum — em particular, a suíte de testes não chama
+mais invalidação nenhuma na sua fixture, e é um teste que verifica essa
+propriedade.
+
+A primeira versão desta PR usava um único índice global de processo, que
+sobrevivia a conexões e execuções e dependia de os testes o limparem.
+Corrigido.
+
+### 6.4 Cobertura projetada
 
 Sobre os 3.454 nomes distintos dos arquivos de volta, pesados pelas
 2.569.358 linhas que os contêm:
@@ -272,7 +337,7 @@ hoje, e passam a ficar nulas **com motivo registrado**.
 > projeção, não uma previsão do que uma reingestão produziria — e
 > reingestão não está autorizada.
 
-### 6.4 Concorrência
+### 6.5 Concorrência
 
 `upsert_driver` continua terminando num `INSERT ... ON CONFLICT
 (first_name, last_name) DO UPDATE`. **A restrição única serializa duas
@@ -300,7 +365,7 @@ normalizada — **migration, que esta PR não faz** — e §9 registra a propost
    389.638 sob `NOT_FOUND` ficam sem piloto.
 3. **Nada do acervo muda.** As 2.845 linhas, os 1.079 grupos duplicados e os
    432.174 `driver_id` nulos continuam como estão.
-4. **A projeção de cobertura não é uma previsão** — ver §6.3.
+4. **A projeção de cobertura não é uma previsão** — ver §6.4.
 5. **`normalize_drivers.py` não foi corrigido.** Ele continua podendo
    renomear linhas e recriar o descasamento com a fonte; o carregador agora
    tolera o descasamento, mas a ferramenta que o produz segue como está.
@@ -334,7 +399,7 @@ Nenhuma está autorizada. Em ordem de evidência disponível:
    Exige migration e **não pode ser criado enquanto a tabela tiver as 1.079
    duplicatas** — depende do item 1.
 4. **Reprocessar o `driver_id` das 432.174 voltas nulas** com a regra nova,
-   sem reingestão completa. Projeção em §6.3; exigiria `UPDATE`, que não
+   sem reingestão completa. Projeção em §6.4; exigiria `UPDATE`, que não
    está autorizado.
 
 A ordem importa: **3 depende de 1**, e 4 só vale a pena depois de 1, pelo

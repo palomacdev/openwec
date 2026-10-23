@@ -22,7 +22,7 @@ from tests.loader.sandbox import connect_to_sandbox  # noqa: E402
 
 from row_identity import (  # noqa: E402
     DriverOutcome,
-    clear_driver_index,
+    forget_driver_index,
     resolve_driver_id,
 )
 from load_classification import upsert_driver  # noqa: E402
@@ -39,8 +39,11 @@ def fonte(first: str, last: str, **extra) -> dict:
 
 @pytest.fixture
 def mundo(sandbox):
-    """Uma conexão por teste, com o índice de pilotos sempre limpo."""
-    clear_driver_index()
+    """
+    Uma conexão por teste. O índice de pilotos é por conexão e morre com
+    ela, então nada precisa ser invalidado aqui — é essa a propriedade que
+    test_o_indice_morre_com_a_conexao verifica.
+    """
     conn = connect_to_sandbox(sandbox)
     cur = conn.cursor()
 
@@ -66,7 +69,6 @@ def mundo(sandbox):
     finally:
         conn.rollback()
         conn.close()
-        clear_driver_index()
 
 
 # ── Leitura ───────────────────────────────────────────────────
@@ -136,7 +138,7 @@ def test_a_restricao_unica_impede_duas_linhas_com_o_mesmo_nome_exato(mundo):
 
 def test_upsert_cria_quando_o_piloto_e_novo(mundo):
     antes = mundo.contar()
-    did = upsert_driver(mundo.cursor, fonte("Kamui", "Kobayashi"))
+    did = upsert_driver(mundo.cursor, fonte("Kamui", "Kobayashi"))[0]
     assert did is not None
     assert mundo.contar() == antes + 1
 
@@ -148,53 +150,89 @@ def test_upsert_reaproveita_a_grafia_normalizada(mundo):
     """
     did = mundo.criar("Giedo", "Van Der Garde")
     antes = mundo.contar()
-    assert upsert_driver(mundo.cursor, fonte("Giedo VAN DER", "GARDE")) == did
+    assert upsert_driver(mundo.cursor, fonte("Giedo VAN DER", "GARDE"))[0] == did
     assert mundo.contar() == antes
 
 
 def test_upsert_nao_renomeia_a_linha_reaproveitada(mundo):
     """Nada aqui estabelece qual grafia e a certa, entao nenhuma e imposta."""
     did = mundo.criar("Giedo", "Van Der Garde", country="NLD")
-    upsert_driver(mundo.cursor, fonte("Giedo VAN DER", "GARDE", country="BEL"))
+    upsert_driver(mundo.cursor, fonte("Giedo VAN DER", "GARDE", country="BEL"))[0]
     mundo.cursor.execute(
         "SELECT first_name, last_name, country FROM drivers WHERE id = %s", (did,))
     assert mundo.cursor.fetchone() == ("Giedo", "Van Der Garde", "NLD")
 
 
-def test_upsert_com_duas_grafias_ambiguas_cria_como_antes(mundo):
+def test_upsert_com_duas_grafias_ambiguas_nao_cria_uma_terceira(mundo):
     """
-    Varios candidatos nao decidem nada. Recusar perderia a associacao, entao
-    o comportamento de hoje e preservado — e a ambiguidade fica contada.
+    Mudou nesta revisao: antes, a ambiguidade caia no INSERT e produzia mais
+    uma linha para um nome que ja respondia a varias. Agora nao insere, nao
+    escolhe, e devolve o motivo.
     """
     mundo.criar("Mark", "Patterson")
     mundo.criar("Mark", "PATTERSON")
     antes = mundo.contar()
-    did = upsert_driver(mundo.cursor, fonte("MARK", "patterson"))
-    assert did is not None
-    assert mundo.contar() == antes + 1
+    did, desfecho = upsert_driver(mundo.cursor, fonte("MARK", "patterson"))
+    assert did is None
+    assert desfecho is DriverOutcome.MULTIPLE_CANDIDATES
+    assert mundo.contar() == antes
+
+
+def test_varias_grafias_ambiguas_nao_aumentam_a_contagem(mundo):
+    """Regressao: nenhuma das grafias cria linha enquanto houver ambiguidade."""
+    mundo.criar("Mark", "Patterson")
+    mundo.criar("Mark", "PATTERSON")
+    antes = mundo.contar()
+    for grafia in (("MARK", "patterson"), ("Mark", "patterson"),
+                   ("mark", "PATTERSON"), ("MARK", "PATTERSON")):
+        did, desfecho = upsert_driver(mundo.cursor, fonte(*grafia))
+        assert did is None
+        assert desfecho is DriverOutcome.MULTIPLE_CANDIDATES
+    assert mundo.contar() == antes
+
+
+def test_a_grafia_exata_continua_resolvendo_mesmo_com_ambiguidade(mundo):
+    """
+    A recusa e so para grafias novas. Quem casa exatamente continua sendo
+    atualizado pelo caminho de sempre.
+    """
+    a = mundo.criar("Mark", "Patterson")
+    mundo.criar("Mark", "PATTERSON")
+    antes = mundo.contar()
+    did, desfecho = upsert_driver(mundo.cursor, fonte("Mark", "Patterson"))
+    assert (did, desfecho) == (a, DriverOutcome.EXACT_NAME)
+    assert mundo.contar() == antes
+
+
+def test_upsert_sem_nome_nao_cria(mundo):
+    antes = mundo.contar()
+    did, desfecho = upsert_driver(mundo.cursor, fonte("", ""))
+    assert did is None
+    assert desfecho is DriverOutcome.NO_NAME
+    assert mundo.contar() == antes
 
 
 def test_upsert_e_idempotente_na_reexecucao(mundo):
-    primeiro = upsert_driver(mundo.cursor, fonte("Kamui", "Kobayashi"))
+    primeiro = upsert_driver(mundo.cursor, fonte("Kamui", "Kobayashi"))[0]
     depois = mundo.contar()
     for _ in range(4):
-        assert upsert_driver(mundo.cursor, fonte("Kamui", "Kobayashi")) == primeiro
+        assert upsert_driver(mundo.cursor, fonte("Kamui", "Kobayashi"))[0] == primeiro
     assert mundo.contar() == depois
 
 
 def test_upsert_da_mesma_pessoa_noutra_grafia_e_idempotente(mundo):
-    primeiro = upsert_driver(mundo.cursor, fonte("Kamui", "Kobayashi"))
+    primeiro = upsert_driver(mundo.cursor, fonte("Kamui", "Kobayashi"))[0]
     depois = mundo.contar()
     for grafia in (("Kamui", "KOBAYASHI"), ("KAMUI", "kobayashi"), ("Kamui", "Kobayashi")):
-        assert upsert_driver(mundo.cursor, fonte(*grafia)) == primeiro
+        assert upsert_driver(mundo.cursor, fonte(*grafia))[0] == primeiro
     assert mundo.contar() == depois
 
 
 def test_abreviacao_continua_sendo_pessoa_separada(mundo):
     """`Nic` nao vira `Nicolas` nem na escrita."""
     antes = mundo.contar()
-    nicolas = upsert_driver(mundo.cursor, fonte("Nicolas", "Minassian"))
-    nic = upsert_driver(mundo.cursor, fonte("Nic", "Minassian"))
+    nicolas = upsert_driver(mundo.cursor, fonte("Nicolas", "Minassian"))[0]
+    nic = upsert_driver(mundo.cursor, fonte("Nic", "Minassian"))[0]
     assert nic != nicolas
     assert mundo.contar() == antes + 2
 
@@ -207,7 +245,6 @@ def test_duas_cargas_simultaneas_nao_criam_duas_linhas(sandbox):
     last_name) serializa o `ON CONFLICT`, entao o nome exato nao pode nascer
     duas vezes — e e so isso que se afirma aqui.
     """
-    clear_driver_index()
     barreira = threading.Barrier(2)
     resultados: list[tuple[int | None, str | None]] = []
     trava = threading.Lock()
@@ -217,7 +254,7 @@ def test_duas_cargas_simultaneas_nao_criam_duas_linhas(sandbox):
         try:
             cur = conn.cursor()
             barreira.wait(timeout=10)
-            did = upsert_driver(cur, fonte("Sebastien", "Buemi"))
+            did = upsert_driver(cur, fonte("Sebastien", "Buemi"))[0]
             conn.commit()
             with trava:
                 resultados.append((did, None))
@@ -249,4 +286,81 @@ def test_duas_cargas_simultaneas_nao_criam_duas_linhas(sandbox):
         assert cur.fetchone()[0] == 1
     finally:
         conferencia.close()
-        clear_driver_index()
+
+
+# ── Ciclo de vida do índice ───────────────────────────────────
+
+def test_o_indice_nao_atravessa_conexoes(sandbox):
+    """
+    Uma conexão escreve, outra lê. Sem índice por conexão, a segunda
+    responderia com o que dobrou antes da escrita.
+    """
+    escritor = connect_to_sandbox(sandbox)
+    leitor = connect_to_sandbox(sandbox)
+    try:
+        ce, cl = escritor.cursor(), leitor.cursor()
+        # o leitor dobra a tabela antes de a linha existir
+        assert resolve_driver_id(cl, "Andre", "Lotterer")[1] is DriverOutcome.NOT_FOUND
+        ce.execute("INSERT INTO drivers (first_name, last_name) VALUES (%s, %s) "
+                   "RETURNING id", ("Andre", "Lotterer"))
+        novo = ce.fetchone()[0]
+        escritor.commit()
+
+        # a conexão do escritor enxerga o que ela própria escreveu
+        assert resolve_driver_id(ce, "Andre", "LOTTERER") == (
+            novo, DriverOutcome.BY_NORMALIZED_NAME)
+
+        # uma conexão nova nasce sem índice e lê a tabela de novo
+        terceiro = connect_to_sandbox(sandbox)
+        try:
+            assert resolve_driver_id(terceiro.cursor(), "Andre", "LOTTERER") == (
+                novo, DriverOutcome.BY_NORMALIZED_NAME)
+        finally:
+            terceiro.close()
+    finally:
+        leitor.close()
+        escritor.rollback()
+        escritor.close()
+
+
+def test_uma_nova_execucao_na_mesma_conexao_rele_a_tabela(sandbox):
+    """
+    O caso que o descarte por conexão sozinho não cobre: a mesma conexão
+    servindo duas execuções. É por isso que os dois `run()` chamam
+    `forget_driver_index` ao começar.
+    """
+    conn = connect_to_sandbox(sandbox)
+    outra = connect_to_sandbox(sandbox)
+    try:
+        cur, co = conn.cursor(), outra.cursor()
+        assert resolve_driver_id(cur, "Mike", "Conway")[1] is DriverOutcome.NOT_FOUND
+
+        co.execute("INSERT INTO drivers (first_name, last_name) VALUES (%s, %s) "
+                   "RETURNING id", ("Mike", "Conway"))
+        criado = co.fetchone()[0]
+        outra.commit()
+
+        # sem o descarte, a conexão antiga insistiria no que dobrou antes
+        assert resolve_driver_id(cur, "Mike", "Conway")[1] is DriverOutcome.NOT_FOUND
+        forget_driver_index(cur)
+        assert resolve_driver_id(cur, "Mike", "Conway") == (
+            criado, DriverOutcome.EXACT_NAME)
+    finally:
+        conn.close()
+        outra.rollback()
+        outra.close()
+
+
+def test_o_que_a_execucao_atual_escreve_fica_visivel(mundo):
+    """`remember_driver` mantém a linha recém-criada ao alcance da mesma conexão."""
+    did, desfecho = upsert_driver(mundo.cursor, fonte("Jose Maria", "Lopez"))
+    assert desfecho is DriverOutcome.NOT_FOUND
+    assert resolve_driver_id(mundo.cursor, "Jose Maria", "LOPEZ") == (
+        did, DriverOutcome.BY_NORMALIZED_NAME)
+
+
+def test_descartar_tudo_nao_quebra_a_proxima_consulta(mundo):
+    did = mundo.criar("Brendon", "Hartley")
+    forget_driver_index()
+    assert resolve_driver_id(mundo.cursor, "Brendon", "HARTLEY") == (
+        did, DriverOutcome.BY_NORMALIZED_NAME)

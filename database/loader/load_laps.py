@@ -32,7 +32,7 @@ from database.db import DB_CONFIG
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from row_identity import (  # noqa: E402
     CarOutcome, DriverOutcome, SessionOutcome,
-    resolve_car_id, resolve_driver_id, resolve_session_id,
+    forget_driver_index, resolve_car_id, resolve_driver_id, resolve_session_id,
 )
 
 
@@ -482,6 +482,10 @@ def run(
 
     conn = psycopg2.connect(**DB_CONFIG)
     cur  = conn.cursor()
+
+    # A run reads the table for itself: a connection that is still open from
+    # an earlier one must not answer with what it folded then.
+    forget_driver_index(cur)
 
     total = {
         "sessions": 0, "ok": 0, "no_match": 0, "ambiguous": 0,

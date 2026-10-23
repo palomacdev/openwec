@@ -78,7 +78,9 @@ from __future__ import annotations
 
 import enum
 import re
+import weakref
 from dataclasses import dataclass
+from typing import Any
 from urllib.parse import unquote
 
 
@@ -389,37 +391,64 @@ def choose_driver(
 
 
 # The whole table is 2.845 rows, and the normalised form cannot be indexed
-# without a migration, so it is folded once per process instead of once per
-# lap: the fallback would otherwise scan the table for each of the 432.174
-# laps that have no exact match.
-_DRIVER_INDEX: dict[str, list[DriverCandidate]] | None = None
+# without a migration, so it is folded instead of consulted per lap: the
+# fallback would otherwise scan the table for each of the 432.174 laps that
+# have no exact match.
+#
+# One fold per connection, held weakly. That is what bounds its life:
+#
+#   between databases   a connection cannot change database, so an index
+#                       can never answer for a different one
+#   between runs        a run opens its own connection and reads the table
+#                       again; `forget_driver_index` covers a run that
+#                       reuses one, and the loaders call it themselves
+#   between connections two connections never share a fold, so one does not
+#                       serve rows another has since written
+#   within a run        `remember_driver` keeps rows this connection just
+#                       wrote visible to its own later lookups
+#
+# The entry disappears when the connection is collected, so nothing has to
+# be invalidated by hand for the common case.
+_DRIVER_INDEX: "weakref.WeakKeyDictionary[Any, dict[str, list[DriverCandidate]]]" = (
+    weakref.WeakKeyDictionary()
+)
 
 
-def clear_driver_index() -> None:
-    """Forget the folded index. Tests call this; a loader run does not."""
-    global _DRIVER_INDEX
-    _DRIVER_INDEX = None
+def forget_driver_index(cur=None) -> None:
+    """
+    Drop the fold for this cursor's connection, or for all of them.
+
+    A loader calls this once when its run begins, so a second run on a
+    connection that is still open reads the table again instead of trusting
+    what another connection may have changed meanwhile.
+    """
+    if cur is None:
+        _DRIVER_INDEX.clear()
+    else:
+        _DRIVER_INDEX.pop(cur.connection, None)
 
 
-def remember_driver(candidate: DriverCandidate) -> None:
-    """Keep a row the loader has just written visible to later lookups."""
-    if _DRIVER_INDEX is None:
+def remember_driver(cur, candidate: DriverCandidate) -> None:
+    """Keep a row this connection has just written visible to its lookups."""
+    indice = _DRIVER_INDEX.get(cur.connection)
+    if indice is None:
         return
-    _DRIVER_INDEX.setdefault(
+    indice.setdefault(
         full_name_key(candidate.first_name, candidate.last_name), []
     ).append(candidate)
 
 
 def driver_index(cur) -> dict[str, list[DriverCandidate]]:
-    global _DRIVER_INDEX
-    if _DRIVER_INDEX is None:
+    conexao = cur.connection
+    indice = _DRIVER_INDEX.get(conexao)
+    if indice is None:
         cur.execute("SELECT id, first_name, last_name FROM drivers")
-        indice: dict[str, list[DriverCandidate]] = {}
+        indice = {}
         for row in cur.fetchall():
             c = DriverCandidate(*row)
             indice.setdefault(full_name_key(c.first_name, c.last_name), []).append(c)
-        _DRIVER_INDEX = indice
-    return _DRIVER_INDEX
+        _DRIVER_INDEX[conexao] = indice
+    return indice
 
 
 def resolve_driver_id(
