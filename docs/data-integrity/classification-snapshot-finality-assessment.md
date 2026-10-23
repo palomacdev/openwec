@@ -282,6 +282,38 @@ Investigadas individualmente. Nenhuma correspondência foi forçada.
 `DERIVED`: o arquivo registra uma corrida mais curta do que a análise mostra
 ter ocorrido. É o padrão oposto ao das 31 corroboradas.
 
+#### Correção (PR #54): o arquivo medido acima é o da `Hour 1`
+
+A medição desta seção **continua correta sobre o arquivo que leu**, e foi
+reproduzida exatamente: `MEASURED` (PR #54) sobre
+`Hour 1/05_Classification_Race.CSV` — líder com 59 voltas em `1:55:12.216`,
+**−287,784 s** da nominal, 27 de 27 carros, **24 divergências de voltas**.
+
+A mesma sessão publica um segundo arquivo de mesmo nome, em `Hour 2`.
+`MEASURED` (PR #54), contra as 1.517 voltas que o banco guarda para os 27
+carros:
+
+| | `Hour 1` | `Hour 2` |
+|---|---|---|
+| líder | 59 voltas, `1:55:12.216` = 6.912,216 s | **62** voltas, `2:00:36.438` = **7.236,438 s** |
+| da nominal de 2 h | **−287,784 s** | **+36,438 s** |
+| carros em comum com o log | 27 de 27 | 27 de 27 |
+| divergências de voltas | **24 de 27** | **0 de 27** |
+
+`DERIVED`: o `Hour 2` satisfaz os dois critérios do §9.1 — líder além da
+duração nominal e zero divergências de voltas. O estado de Monza 2018 passa
+a **`FINALITY_CORROBORATED`**, pelo arquivo `Hour 2`, com o alcance de
+sempre: posterior à chegada, **não** homologação comprovada.
+
+`DERIVED`: as contagens do §1 e do §9 passam de **49 / 1 / 2** para
+**50 / 0 / 2**, e `PARTIAL_OR_DIVERGENT` fica **vazia**. As tabelas desta PR
+não foram reescritas; a revisão está registrada aqui, no §9.3 e em
+`recovery-eligibility-scan.md` §7.
+
+`DERIVED`: o `Hour 2` é também o arquivo que `get_final_classification`
+escolhe, pelo desempate que a PR #53 acrescentou. A escolha do `Hour 1` na
+medição original foi de quem a fez, não do seletor.
+
 ### 7.3 e 7.4 IMSA 2016, Watkins Glen — campeonato errado
 
 Duas entradas de catálogo para a mesma sessão, uma por campeonato.
@@ -370,7 +402,11 @@ mesmo assim é `PARTIAL_OR_DIVERGENT`.
 
 ### 9.3 Os casos que não corroboraram
 
-**`PARTIAL_OR_DIVERGENT` — Le Mans Cup 2018, Monza.** §7.2.
+~~**`PARTIAL_OR_DIVERGENT` — Le Mans Cup 2018, Monza.**~~ **Revisto pela PR
+#54 para `FINALITY_CORROBORATED`**: a medição foi feita sobre o arquivo da
+`Hour 1`, e o da `Hour 2` da mesma sessão traz o líder **+36 s** além da
+nominal com **zero** divergências de voltas. A medição original está
+preservada em §7.2, junto da correção.
 
 **`INDETERMINATE` — Le Mans Cup 2017, Red Bull Ring** (duas entradas de
 catálogo, uma sessão). `MEASURED`: líder com 76 voltas e `1:58'30.790`,

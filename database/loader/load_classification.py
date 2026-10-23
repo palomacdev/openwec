@@ -428,6 +428,13 @@ CLASSIFICATION_FILE = re.compile(
 # preferring the file that can be read at all.
 HOUR_SUFFIXED = re.compile(r"_hour\s*\d+\.csv$", re.IGNORECASE)
 
+# "6H", "3 Hours", "1 Hour" — the hour written before the word. A folder has
+# to be nothing else; in a file name the mark is the last thing before the
+# extension. Both are anchored, because a bare number beside an unrelated
+# word is not an hour mark: "Race 1" is a race, not one hour.
+HOUR_BEFORE_WORD = re.compile(r"^(\d+)\s*h(ours?)?$", re.IGNORECASE)
+HOUR_BEFORE_WORD_SUFFIX = re.compile(r"_(\d+)\s*h(ours?)?$", re.IGNORECASE)
+
 
 def is_classification_file(path: Path) -> bool:
     return path.suffix.lower() == ".csv" and bool(CLASSIFICATION_FILE.match(path.name))
@@ -471,6 +478,15 @@ def get_final_classification(classification_dir: Path) -> Path | None:
             return int(m.group(1))
         # Try filename
         m = re.search(r"[Hh]our\s*(\d+)", p.name)
+        if m:
+            return int(m.group(1))
+        # The publisher also writes the hour before the word, and sometimes
+        # abbreviates it: "6H", "3 Hours", "1 Hour". `MEASURED`: the ELMS
+        # catalogue uses these spellings for 152 files, and `raw/` holds six
+        # such folders. Read only as a whole name, so that a "Race 1" folder
+        # or a "24_Hour 24" prefix is not mistaken for an hour mark.
+        m = (HOUR_BEFORE_WORD.match(folder)
+             or HOUR_BEFORE_WORD_SUFFIX.search(p.stem))
         if m:
             return int(m.group(1))
         # Try numeric prefix in folder: "24_Hour 24" → 24
