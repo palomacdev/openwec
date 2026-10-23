@@ -80,6 +80,9 @@ jobs:
           DB_PASSWORD: openwec
           OPENWEC_TEST_DB_IS_DISPOSABLE: "1"
 
+      - name: Run enrichment guard tests (no DB needed)
+        run: pytest tests/enrichment/ -v
+
       - name: Run SDK tests (no DB needed)
         run: pytest tests/sdk/ -v
 
