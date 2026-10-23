@@ -38,7 +38,10 @@ from pathlib import Path
 from database.db import DB_CONFIG
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from row_identity import SessionOutcome, resolve_session_id  # noqa: E402
+from row_identity import (  # noqa: E402
+    DriverCandidate, DriverOutcome, SessionOutcome,
+    remember_driver, resolve_driver_id, resolve_session_id,
+)
 
 
 # ── Config ───────────────────────────────────────────────────
@@ -504,8 +507,30 @@ def upsert_car(cur, number: str, team_id: int, row: dict, series_key: str) -> in
 
 
 def upsert_driver(cur, d: dict) -> int | None:
+    """
+    The driver row this source name belongs to, creating it if it is new.
+
+    Before creating one, the stored names are consulted in their normalised
+    form. `drivers` is unique on the raw (first_name, last_name), so a row
+    whose name was rewritten afterwards — `normalize_drivers.py` turned
+    "Giedo VAN DER"/"GARDE" into "Giedo"/"Van Der Garde" — no longer matches
+    the spelling the source still carries, and the loader used to insert a
+    second row for the same person. Measured: 1.079 names held by 2.219
+    rows, 820 of those groups created in different ingestion windows.
+
+    A single normalised match is reused, and left exactly as it is: the row
+    is not renamed and its country or identifiers are not overwritten, since
+    nothing here establishes which spelling is the right one. Several
+    matches decide nothing, so the row is created as before rather than
+    guessing — that keeps the behaviour no worse than today and leaves the
+    ambiguity visible in the count.
+    """
     if not d["first_name"] and not d["last_name"]:
         return None
+
+    encontrado, desfecho = resolve_driver_id(cur, d["first_name"], d["last_name"])
+    if desfecho is DriverOutcome.BY_NORMALIZED_NAME:
+        return encontrado
 
     cur.execute("""
         INSERT INTO drivers (
@@ -526,7 +551,9 @@ def upsert_driver(cur, d: dict) -> int | None:
         d["imsa_driver_id"], d["imsa_driver_plug_id"],
         d["imsa_driver_rating"],
     ))
-    return cur.fetchone()[0]
+    novo = cur.fetchone()[0]
+    remember_driver(DriverCandidate(novo, d["first_name"] or "", d["last_name"] or ""))
+    return novo
 
 
 def insert_result(cur, session_id: int, car_id: int, row: dict) -> int | None:

@@ -49,8 +49,8 @@ FIXTURE_CEILING = {"results": 1_000, "laps": 1_000, "cars": 1_000}
 # resolving a session joins all three, and a table missing from the sandbox
 # would resolve through search_path to the one in public — that is, the
 # suite would read the real corpus.
-SANDBOX_TABLES = ("series", "seasons", "events", "teams", "sessions",
-                  "cars", "results")
+SANDBOX_TABLES = ("series", "seasons", "events", "teams", "drivers",
+                  "sessions", "cars", "results")
 
 
 def declared_disposable() -> bool:

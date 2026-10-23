@@ -31,7 +31,8 @@ from database.db import DB_CONFIG
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from row_identity import (  # noqa: E402
-    CarOutcome, SessionOutcome, resolve_car_id, resolve_session_id,
+    CarOutcome, DriverOutcome, SessionOutcome,
+    resolve_car_id, resolve_driver_id, resolve_session_id,
 )
 
 
@@ -238,16 +239,20 @@ def get_car_id(
                           team_name, car_class, car_group)
 
 
-def get_driver_id(cur, first_name: str, last_name: str) -> int | None:
-    if not first_name and not last_name:
-        return None
-    cur.execute("""
-        SELECT id FROM drivers
-        WHERE first_name = %s AND last_name = %s
-        LIMIT 1
-    """, (first_name, last_name))
-    row = cur.fetchone()
-    return row[0] if row else None
+def get_driver_id(
+    cur, first_name: str, last_name: str
+) -> tuple[int | None, DriverOutcome]:
+    """
+    Which driver row this lap's name refers to.
+
+    The exact spelling still wins, so every lap that resolved before resolves
+    the same way. What is new is the fallback: where the stored row carries
+    the same name written differently — because `normalize_drivers.py`
+    rewrote it after the loader had stored the source spelling — the lap now
+    finds it, provided exactly one row carries that name. Where several do,
+    it refuses rather than pick one by id.
+    """
+    return resolve_driver_id(cur, first_name, last_name)
 
 
 # ── Session finder ────────────────────────────────────────────
@@ -392,6 +397,8 @@ def process_session(cur, series_key: str, sess: dict, dry_run: bool) -> dict:
     skipped  = 0
     # Why a lap was left out, rather than one count for every reason.
     unresolved = {o: 0 for o in CarOutcome if not o.resolved}
+    # Por que a volta ficou sem piloto, em vez de so ficar nula.
+    sem_piloto = {o: 0 for o in DriverOutcome if not o.resolved}
 
     for row in rows:
         car_number = row.get("NUMBER", "").strip()
@@ -416,7 +423,9 @@ def process_session(cur, series_key: str, sess: dict, dry_run: bool) -> dict:
         driver_name = row.get("DRIVER_NAME", "").strip()
         if driver_name:
             first, last = parse_driver_name(driver_name)
-            driver_id = get_driver_id(cur, first, last)
+            driver_id, drv_outcome = get_driver_id(cur, first, last)
+            if not driver_id:
+                sem_piloto[drv_outcome] += 1
 
         lap_row = build_lap_row(session_id, car_id, driver_id, row)
         if lap_row:
@@ -438,12 +447,22 @@ def process_session(cur, series_key: str, sess: dict, dry_run: bool) -> dict:
         if unresolved[desfecho]:
             print(f"    [{rotulo}] {unresolved[desfecho]} laps: {porque}")
 
+    for desfecho, rotulo, porque in (
+        (DriverOutcome.MULTIPLE_CANDIDATES, "AMBIGUOUS DRIVER",
+         "the name is held by more than one driver row, and nothing says which"),
+        (DriverOutcome.NOT_FOUND, "DRIVER NOT FOUND",
+         "no driver row carries this name, in any spelling"),
+    ):
+        if sem_piloto[desfecho]:
+            print(f"    [{rotulo}] {sem_piloto[desfecho]} laps: {porque}")
+
     return {
         "status":     "ok",
         "rows":       len(rows),
         "loaded":     len(lap_rows),
         "skipped":    skipped,
         "unresolved": {o.value: n for o, n in unresolved.items()},
+        "sem_piloto": {o.value: n for o, n in sem_piloto.items()},
     }
 
 

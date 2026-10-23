@@ -292,10 +292,19 @@ WITH d AS (SELECT id, regexp_replace(lower(first_name||last_name),
 SELECT count(*), count(DISTINCT n), count(*) - count(DISTINCT n) FROM d;
 ```
 
-`get_driver_id` em `load_laps.py` procura por igualdade exata de
-`(first_name, last_name)` e devolve `LIMIT 1` **sem `ORDER BY`** — o mesmo
-defeito que a PR #41 corrigiu em `get_car_id` e `get_session_id`, numa função
-que não estava no escopo daquela PR e continua como está.
+> **Correção (PR #45).** Este documento afirmava aqui que `get_driver_id`
+> sofria do mesmo defeito que a PR #41 corrigiu em `get_car_id` e
+> `get_session_id`: `LIMIT 1` sem `ORDER BY`. **A afirmação está errada.**
+> `drivers` tem `UNIQUE (first_name, last_name)`, então a consulta por
+> igualdade exata devolve no máximo uma linha e sempre devolveu a mesma. Não
+> havia não-determinismo.
+>
+> A causa real das duplicatas está em
+> [driver-identity-assessment.md](driver-identity-assessment.md): a restrição
+> é sobre as cadeias cruas, `normalize_drivers.py` reescreveu nomes
+> armazenados, e cargas posteriores reencontraram a grafia original da fonte,
+> não casaram no `UNIQUE` e inseriram uma segunda linha. Medido: 820 dos
+> 1.079 grupos duplicados nasceram em janelas de ingestão diferentes.
 
 ### 6.4 Efeito de versões diferentes do arquivo de origem
 
@@ -425,9 +434,9 @@ Isto é insumo para a decisão, **não a decisão**.
    seria errada aqui.
 5. **Tratar `drivers` antes, ou junto.** 1.140 linhas excedentes em
    `drivers` são a causa de 11.242 dos 11.302 conflitos. Consolidá-las
-   dissolve o conflito em vez de arbitrá-lo — e `get_driver_id` ainda usa
-   `LIMIT 1` sem `ORDER BY`, então o defeito continua produzindo divergência
-   a cada carga.
+   dissolve o conflito em vez de arbitrá-lo. *(PR #45: a segunda metade
+   desta recomendação, sobre `LIMIT 1` sem `ORDER BY` em `get_driver_id`,
+   estava incorreta — ver a correção em §6.3.)*
 6. **Manter os 60 em aberto.** A fonte corrobora que são as mesmas voltas e
    indica uma das grafias, mas não estabelece a identidade da pessoa. São
    0,17 % dos pares; retê-los não bloqueia o resto.

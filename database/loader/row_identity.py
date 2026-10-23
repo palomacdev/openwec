@@ -109,11 +109,31 @@ class CarOutcome(enum.Enum):
                         CarOutcome.BY_SOURCE_ATTRIBUTES)
 
 
+class DriverOutcome(enum.Enum):
+    EXACT_NAME = "exact_name"
+    BY_NORMALIZED_NAME = "by_normalized_name"
+    NO_NAME = "no_name"
+    NOT_FOUND = "not_found"
+    MULTIPLE_CANDIDATES = "multiple_candidates"
+
+    @property
+    def resolved(self) -> bool:
+        return self in (DriverOutcome.EXACT_NAME,
+                        DriverOutcome.BY_NORMALIZED_NAME)
+
+
 @dataclass(frozen=True)
 class SessionCandidate:
     session_id: int
     raw_id: str
     source_url: str | None
+
+
+@dataclass(frozen=True)
+class DriverCandidate:
+    driver_id: int
+    first_name: str | None
+    last_name: str | None
 
 
 @dataclass(frozen=True)
@@ -313,6 +333,104 @@ def resolve_session_id(
                 (series_key, season_raw, event_raw, session_name))
     candidates = [SessionCandidate(*row) for row in cur.fetchall()]
     return choose_session(candidates, championship_raw)
+
+
+def full_name_key(first_name: str | None, last_name: str | None) -> str:
+    """
+    The form two renderings of one driver's name are compared in.
+
+    First and last are joined before folding, because the boundary between
+    them is an artefact of the parser, not of the source:
+    `split_wec_driver_name` cuts at the last space, so "Giedo VAN DER GARDE"
+    becomes ("Giedo VAN DER", "GARDE") while another path produced
+    ("Giedo", "Van Der Garde"). Comparing the two fields separately would
+    call one driver two people.
+
+    Folding is `comparable`: case and punctuation, nothing else. "Nic" does
+    not become "Nicolas" here, and no nickname table exists.
+    """
+    return comparable((first_name or "") + (last_name or ""))
+
+
+def choose_driver(
+    candidates: list[DriverCandidate],
+    first_name: str | None,
+    last_name: str | None,
+) -> tuple[int | None, DriverOutcome]:
+    """
+    Which driver row a source name refers to.
+
+    The exact spelling wins when it exists — `drivers` is unique on
+    (first_name, last_name), so at most one row can carry it, and taking it
+    preserves exactly what the loader did before.
+
+    Otherwise the normalised full name decides, and only when **one** row
+    carries it. Several rows carrying it is the shape of the duplication
+    measured in this table — 1.079 names held by 2.219 rows — and picking
+    one of them would be picking by id, which decides nothing.
+    """
+    if not _stated(first_name) and not _stated(last_name):
+        return None, DriverOutcome.NO_NAME
+
+    exact = [c for c in candidates
+             if (c.first_name or "") == (first_name or "")
+             and (c.last_name or "") == (last_name or "")]
+    if exact:
+        return min(c.driver_id for c in exact), DriverOutcome.EXACT_NAME
+
+    chave = full_name_key(first_name, last_name)
+    iguais = [c for c in candidates
+              if full_name_key(c.first_name, c.last_name) == chave]
+    if len(iguais) == 1:
+        return iguais[0].driver_id, DriverOutcome.BY_NORMALIZED_NAME
+    if len(iguais) > 1:
+        return None, DriverOutcome.MULTIPLE_CANDIDATES
+    return None, DriverOutcome.NOT_FOUND
+
+
+# The whole table is 2.845 rows, and the normalised form cannot be indexed
+# without a migration, so it is folded once per process instead of once per
+# lap: the fallback would otherwise scan the table for each of the 432.174
+# laps that have no exact match.
+_DRIVER_INDEX: dict[str, list[DriverCandidate]] | None = None
+
+
+def clear_driver_index() -> None:
+    """Forget the folded index. Tests call this; a loader run does not."""
+    global _DRIVER_INDEX
+    _DRIVER_INDEX = None
+
+
+def remember_driver(candidate: DriverCandidate) -> None:
+    """Keep a row the loader has just written visible to later lookups."""
+    if _DRIVER_INDEX is None:
+        return
+    _DRIVER_INDEX.setdefault(
+        full_name_key(candidate.first_name, candidate.last_name), []
+    ).append(candidate)
+
+
+def driver_index(cur) -> dict[str, list[DriverCandidate]]:
+    global _DRIVER_INDEX
+    if _DRIVER_INDEX is None:
+        cur.execute("SELECT id, first_name, last_name FROM drivers")
+        indice: dict[str, list[DriverCandidate]] = {}
+        for row in cur.fetchall():
+            c = DriverCandidate(*row)
+            indice.setdefault(full_name_key(c.first_name, c.last_name), []).append(c)
+        _DRIVER_INDEX = indice
+    return _DRIVER_INDEX
+
+
+def resolve_driver_id(
+    cur,
+    first_name: str | None,
+    last_name: str | None,
+) -> tuple[int | None, DriverOutcome]:
+    if not _stated(first_name) and not _stated(last_name):
+        return None, DriverOutcome.NO_NAME
+    candidatos = driver_index(cur).get(full_name_key(first_name, last_name), [])
+    return choose_driver(candidatos, first_name, last_name)
 
 
 def resolve_car_id(
