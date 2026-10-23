@@ -33,6 +33,25 @@ por instante.
 | `PARTIAL_OR_DIVERGENT` | **1** |
 | `INDETERMINATE` | **2** |
 
+> **O que `FINALITY_CORROBORATED` afirma, e o que não afirma.** Ele
+> significa: *evidência consistente de que o arquivo representa a
+> classificação **após o encerramento da corrida**, sem comprovação
+> independente de que seja a versão oficial definitiva depois de eventuais
+> revisões.*
+>
+> O que as medições demonstram é que a corrida já havia terminado quando o
+> arquivo foi montado, que ele cobre todos os carros que a análise conhece,
+> e que voltas, equipe e classe coincidem. O que elas **não** demonstram:
+>
+> - que não houve versão publicada depois;
+> - que penalizações aplicadas após a bandeirada já estavam incorporadas;
+> - que o arquivo é a classificação oficial definitiva;
+> - que posição e status foram validados contra uma segunda fonte final —
+>   `MEASURED`: a análise local não traz nenhum dos dois (§2.1).
+>
+> `DERIVED`: "posterior ao fim da corrida" e "oficial definitiva" são
+> afirmações diferentes, e só a primeira está medida.
+
 `MEASURED`: **1.113 carros comparados**, 1.101 presentes nas duas fontes,
 12 apenas na classificação, **zero apenas na análise**, 37 divergências de
 voltas.
@@ -313,7 +332,26 @@ concentra 24. Nas outras 34 entradas, a mediana de divergências por sessão
 | `PARTIAL_OR_DIVERGENT` | **1** | 1 |
 | `INDETERMINATE` | **2** | 1 |
 
-### 9.1 Evidências que sustentam `FINALITY_CORROBORATED`
+### 9.1 O que `FINALITY_CORROBORATED` significa
+
+**Definição.** Evidência consistente de que o arquivo representa a
+classificação **após o encerramento da corrida**, sem comprovação
+independente de que seja a versão oficial definitiva após eventuais
+revisões.
+
+| a evidência sustenta | a evidência **não** sustenta |
+|---|---|
+| a corrida terminou antes de o arquivo ser montado | que não houve revisão posterior |
+| todos os carros da análise estão cobertos | que penalizações pós-corrida estão incorporadas |
+| voltas, equipe e classe coincidem | que é a versão oficial definitiva |
+| `STATUS` está preenchido | que posição e status foram validados contra outra fonte final |
+
+`DERIVED`: a quarta coluna da direita é intransponível com o que existe
+hoje — `MEASURED` (§2.1): o arquivo de análise **não traz posição nem
+status**, então não há segunda fonte local contra a qual validá-los.
+Confirmá-los exigiria uma terceira fonte, que não foi procurada.
+
+### 9.2 Evidências que sustentam o estado
 
 Quatro, independentes, exigidas em conjunto:
 
@@ -330,7 +368,7 @@ coincidência de voltas é a evidência 2 de 4, e sozinha não bastou em nenhum
 caso — Monza 2018 tem fonte que casa perfeitamente em números de carro e
 mesmo assim é `PARTIAL_OR_DIVERGENT`.
 
-### 9.2 Os casos que não corroboraram
+### 9.3 Os casos que não corroboraram
 
 **`PARTIAL_OR_DIVERGENT` — Le Mans Cup 2018, Monza.** §7.2.
 
@@ -375,13 +413,51 @@ segurança do escopo, fica `INDETERMINATE`.
 | entradas indeterminadas | 4 | **2** |
 
 `DERIVED`: **49 das 52 entradas** têm agora fonte acessível, correspondente
-à sessão, e com evidência de finalidade. Isso cobre a quase totalidade das
+à sessão, e com evidência de finalidade **no sentido definido em §9.1** —
+posterior ao encerramento da corrida. Isso cobre a quase totalidade das
 324.720 linhas.
+
+> **O que isso permite reconstruir, e sob que ressalva.** Uma reconstrução
+> feita com essas fontes produziria a classificação **como estava ao fim da
+> corrida**. `UNKNOWN`: se alguma delas foi revista depois — por
+> penalização aplicada fora de pista, recurso, ou exclusão posterior. Nada
+> nos arquivos permite distinguir uma classificação provisória de uma
+> definitiva, e nenhuma segunda fonte final foi consultada.
+>
+> `PROPOSED`: se o acervo reconstruído for usado para análise competitiva,
+> essa ressalva precisa viajar com o dado — a classificação registrada
+> seria a do fim da corrida, não necessariamente a homologada.
 
 `DERIVED`: a estratégia **B — reconstrução** passa a ter o seu pressuposto
 central verificado. O que resta não é "a fonte serve?", e sim as decisões
 operacionais: baixar, estender o filtro de nome, e tratar os 5 arquivos de
-cabeçalho desalinhado.
+cabeçalho desalinhado — este último é **pré-condição**, não detalhe; §11.1.
+
+### 11.1 Pré-condição: os arquivos de 93 colunas
+
+`MEASURED`: 5 dos arquivos verificados têm **cabeçalho de 93 campos e
+linhas de dados de 73**, com as informações relevantes presentes apesar da
+diferença. `MEASURED`: esse comportamento **já produziu um resultado falso**
+— a PR #49 registrou duas entradas como "sem interseção de números de
+carro" porque a rotina descartava linhas mais estreitas que o cabeçalho;
+a interseção real é 28 de 28 e 27 de 27 (§7.1).
+
+Quatro requisitos, registrados como pré-condição de qualquer recuperação:
+
+1. **A presença de um campo no cabeçalho não garante extração correta.**
+   Os 93 nomes existem; os valores param no 73º.
+2. **A leitura precisa tolerar linhas mais curtas sem deslocar valores.**
+   Descartá-las produz ausência falsa; preenchê-las à direita é seguro
+   apenas porque as 16 primeiras colunas alinham — o que também precisa
+   ser verificado, não suposto.
+3. **A compatibilidade precisa ser comprovada por testes específicos**
+   sobre esses arquivos, antes de qualquer ingestão.
+4. **Nenhuma reconstrução pode depender desses arquivos** enquanto essa
+   validação não existir.
+
+`PROPOSED`: nada disso foi implementado aqui, e o parser não foi alterado.
+`DERIVED`: as entradas afetadas são identificáveis — basta comparar a
+largura do cabeçalho com a das linhas ao ler.
 
 `PROPOSED`: as correções do §1.1 **sejam aplicadas aos documentos da #49**
 numa PR própria, porque alteram dois estados que aquele documento registrou
@@ -396,7 +472,8 @@ contra o campeonato errado.
 |---|---|---|
 | 1 | **Autorizar o download** das 49 fontes corroboradas para `raw/` | pendente; nada mais a verificar |
 | 2 | **Estender `is_classification_file`** para `05_Classification*` e `05_Results by Hour*`, com as três grafias de hora | pendente |
-| 3 | **Tratar os 5 arquivos de 93 colunas com linhas de 73** — ler por posição nas 16 primeiras | pendente |
+| 3 | **Tratar os 5 arquivos de 93 colunas com linhas de 73** — §11.1, com os quatro requisitos; é **pré-condição**, não ajuste | pendente |
+| 3b | **Decidir se "posterior ao fim da corrida" basta**, ou se a reconstrução exige confirmar a versão homologada (§9.1) | pendente |
 | 4 | **Corrigir os dois estados da #49** (§1.1) | pendente; é registro |
 | 5 | Monza 2018 e Red Bull Ring 2017 | `PROPOSED`: excluí-las da primeira reconstrução |
 | 6 | **Incluir IMSA em `load_laps.RAW_DIRS`** | escopo novo, descoberto em §7.3 |
