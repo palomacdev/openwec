@@ -23,10 +23,16 @@ import argparse
 import csv
 import io
 import re
+import sys
 import psycopg2
 from psycopg2.extras import execute_values
 from pathlib import Path
 from database.db import DB_CONFIG
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from row_identity import (  # noqa: E402
+    CarOutcome, SessionOutcome, resolve_car_id, resolve_session_id,
+)
 
 
 # ── Config ───────────────────────────────────────────────────
@@ -184,34 +190,37 @@ def get_final_analysis(analysis_dir: Path) -> Path | None:
 
 # ── DB lookups ────────────────────────────────────────────────
 
-def get_session_id(cur, series_key: str, season_raw: str, event_raw: str, session_name: str) -> int | None:
-    print(f"    LOOKUP: series={series_key} season={season_raw} event={event_raw} session={session_name}")
+def get_session_id(
+    cur,
+    series_key: str,
+    season_raw: str,
+    event_raw: str,
+    session_name: str,
+    championship_raw: str | None = None,
+) -> tuple[int | None, SessionOutcome]:
+    """
+    Which session row this folder is. A folder name several sessions answer
+    to resolves to nothing: laps must not land in another championship's
+    session by coincidence of name.
+    """
+    return resolve_session_id(cur, series_key, season_raw, event_raw,
+                              session_name, championship_raw)
 
-    cur.execute("""
-        SELECT s.id FROM sessions s
-        JOIN events e   ON e.id = s.event_id
-        JOIN seasons se ON se.id = e.season_id
-        JOIN series sr  ON sr.id = se.series_id
-        WHERE sr.key::text = %s
-          AND se.raw_id    = %s
-          AND e.raw_id     = %s
-          AND s.name       = %s
-        LIMIT 1
-    """, (series_key, season_raw, event_raw, session_name))
-    row = cur.fetchone()
-    return row[0] if row else None
 
-
-def get_car_id(cur, session_id: int, car_number: str) -> int | None:
-    """Find car by session + number via results table."""
-    cur.execute("""
-        SELECT c.id FROM cars c
-        JOIN results r ON r.car_id = c.id
-        WHERE r.session_id = %s AND c.number = %s
-        LIMIT 1
-    """, (session_id, car_number))
-    row = cur.fetchone()
-    return row[0] if row else None
+def get_car_id(
+    cur,
+    session_id: int,
+    car_number: str,
+    team_name: str | None = None,
+    car_class: str | None = None,
+    car_group: str | None = None,
+) -> tuple[int | None, CarOutcome]:
+    """
+    Which car row this lap belongs to, among those classified under this
+    number in this session. A number alone is not a car; see row_identity.
+    """
+    return resolve_car_id(cur, session_id, car_number,
+                          team_name, car_class, car_group)
 
 
 def get_driver_id(cur, first_name: str, last_name: str) -> int | None:
@@ -349,9 +358,16 @@ def process_session(cur, series_key: str, sess: dict, dry_run: bool) -> dict:
     if not rows:
         return {"status": "empty"}
 
-    session_id = get_session_id(cur, series_key, season_raw, event_raw, session_name)
-    print(f"    SESSION_ID: {session_id}")
+    session_id, outcome = get_session_id(
+        cur, series_key, season_raw, event_raw, session_name,
+        sess.get("championship_raw"),
+    )
+    print(f"    SESSION_ID: {session_id} ({outcome.value})")
     if not session_id:
+        if outcome is SessionOutcome.MULTIPLE_CANDIDATES:
+            return {"status": "ambiguous_session"}
+        if outcome is SessionOutcome.CONTRADICTED_BY_CHAMPIONSHIP:
+            return {"status": "contradicted_session"}
         return {"status": "no_session_match"}
 
     if dry_run:
@@ -359,6 +375,8 @@ def process_session(cur, series_key: str, sess: dict, dry_run: bool) -> dict:
 
     lap_rows = []
     skipped  = 0
+    # Why a lap was left out, rather than one count for every reason.
+    unresolved = {o: 0 for o in CarOutcome if not o.resolved}
 
     for row in rows:
         car_number = row.get("NUMBER", "").strip()
@@ -366,8 +384,15 @@ def process_session(cur, series_key: str, sess: dict, dry_run: bool) -> dict:
             skipped += 1
             continue
 
-        car_id = get_car_id(cur, session_id, car_number)
+        # TEAM, CLASS and GROUP are the only identity attributes a lap file
+        # carries, and 11% of the files carry none of them. They narrow a
+        # number several cars answer to; they never stand in for the tuple.
+        car_id, car_outcome = get_car_id(
+            cur, session_id, car_number,
+            row.get("TEAM"), row.get("CLASS"), row.get("GROUP"),
+        )
         if not car_id:
+            unresolved[car_outcome] += 1
             skipped += 1
             continue
 
@@ -385,11 +410,25 @@ def process_session(cur, series_key: str, sess: dict, dry_run: bool) -> dict:
     if lap_rows:
         execute_values(cur, INSERT_SQL, lap_rows)
 
+    for desfecho, rotulo, porque in (
+        (CarOutcome.MULTIPLE_IDENTITIES, "AMBIGUOUS CAR",
+         "the number answers to more than one car identity in this session"),
+        (CarOutcome.CONTRADICTED_BY_SOURCE, "CONTRADICTED CAR",
+         "the lap row states a team, class or group the classification denies"),
+        (CarOutcome.NO_CLASSIFICATION, "NO CLASSIFICATION",
+         "the session has no classification to resolve a car against"),
+        (CarOutcome.NOT_IN_CLASSIFICATION, "CAR NOT CLASSIFIED",
+         "this number is not in the classification of this session"),
+    ):
+        if unresolved[desfecho]:
+            print(f"    [{rotulo}] {unresolved[desfecho]} laps: {porque}")
+
     return {
-        "status":  "ok",
-        "rows":    len(rows),
-        "loaded":  len(lap_rows),
-        "skipped": skipped,
+        "status":     "ok",
+        "rows":       len(rows),
+        "loaded":     len(lap_rows),
+        "skipped":    skipped,
+        "unresolved": {o.value: n for o, n in unresolved.items()},
     }
 
 
@@ -411,8 +450,8 @@ def run(
     cur  = conn.cursor()
 
     total = {
-        "sessions": 0, "ok": 0, "no_match": 0,
-        "empty": 0, "errors": 0, "laps": 0,
+        "sessions": 0, "ok": 0, "no_match": 0, "ambiguous": 0,
+        "contradicted": 0, "empty": 0, "errors": 0, "laps": 0,
     }
 
     series_to_run = RAW_DIRS
@@ -431,7 +470,8 @@ def run(
             ]
 
         print(f"  Found {len(sessions)} analysis sessions")
-        series_stats = {"ok": 0, "no_match": 0, "empty": 0, "errors": 0, "laps": 0}
+        series_stats = {"ok": 0, "no_match": 0, "ambiguous": 0,
+                        "contradicted": 0, "empty": 0, "errors": 0, "laps": 0}
 
         for sess in sessions:
             total["sessions"] += 1
@@ -448,7 +488,16 @@ def run(
                 elif status == "no_session_match":
                     series_stats["no_match"] += 1
                     total["no_match"] += 1
-                    print(f"  [NO MATCH] {season_raw}/{event_raw}/{session_name}")
+                    print(f"  [NO MATCH] {sess['season_raw']}/{sess['event_raw']}/{sess['session_name']}")
+                elif status == "ambiguous_session":
+                    series_stats["ambiguous"] += 1
+                    total["ambiguous"] += 1
+                    print(f"  [AMBIGUOUS SESSION] {sess['season_raw']}/{sess['event_raw']}/{sess['session_name']}")
+                elif status == "contradicted_session":
+                    series_stats["contradicted"] += 1
+                    total["contradicted"] += 1
+                    print(f"  [CONTRADICTED SESSION] {sess['season_raw']}/{sess['event_raw']}/{sess['session_name']}"
+                          f" — the only session of this name belongs to another championship")
                 elif status == "empty":
                     series_stats["empty"] += 1
                     total["empty"] += 1
@@ -464,7 +513,10 @@ def run(
                 print(f"  [ERROR] {sess['season_raw']}/{sess['event_raw']}/{sess['session_name']}: {e}")
 
         print(f"  ✓ {series_stats['ok']}  laps: {series_stats['laps']:,}  "
-              f"no_match: {series_stats['no_match']}  errors: {series_stats['errors']}")
+              f"no_match: {series_stats['no_match']}  "
+              f"ambiguous: {series_stats['ambiguous']}  "
+              f"contradicted: {series_stats['contradicted']}  "
+              f"errors: {series_stats['errors']}")
 
     if not dry_run:
         conn.commit()

@@ -105,10 +105,12 @@ def test_sem_a_declaracao_nada_roda():
 def test_o_sandbox_cobre_as_tabelas_que_o_loader_escreve():
     """
     `upsert_car` escreve em cars, `insert_result` em results, e as duas
-    dependem de teams e sessions. Uma tabela de fora faria o teste cair em
-    `public` pelo search_path.
+    dependem de teams e sessions. Resolver uma sessao le ainda series,
+    seasons e events. Uma tabela de fora faria o teste cair em `public`
+    pelo search_path — ou seja, ler o acervo real.
     """
-    assert set(SANDBOX_TABLES) == {"teams", "sessions", "cars", "results"}
+    assert set(SANDBOX_TABLES) == {"series", "seasons", "events", "teams",
+                                   "sessions", "cars", "results"}
 
 
 def test_a_limpeza_nao_e_por_delete():
