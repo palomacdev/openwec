@@ -342,6 +342,28 @@ def extract_drivers_imsa(row: dict) -> list[dict]:
     return drivers
 
 
+# The two shapes are told apart by the columns the file has, not by the series
+# it was published under. `MEASURED`: the Le Mans Cup 2018 classifications of
+# Paul Ricard and Monza spell their driver columns `DRIVER1_FIRSTNAME` /
+# `DRIVER1_SECONDNAME` and carry no `DRIVER_1` at all, so choosing the
+# extractor by series drops every driver in silence — the car and the result
+# load, the names do not. The series is kept only as the tie-break for a row
+# that shows neither shape, where there is nothing to read either way.
+def driver_column_shape(row: dict) -> str | None:
+    if any(f"DRIVER_{i}" in row for i in range(1, 6)):
+        return "wec"
+    if any(f"DRIVER{i}_FIRSTNAME" in row or f"DRIVER{i}_SECONDNAME" in row
+           for i in range(1, 7)):
+        return "imsa"
+    return None
+
+
+def extract_drivers(row: dict, series_key: str) -> list[dict]:
+    """The drivers of this row, read in whichever shape the row is written."""
+    shape = driver_column_shape(row) or ("imsa" if series_key == "IMSA" else "wec")
+    return extract_drivers_imsa(row) if shape == "imsa" else extract_drivers_wec(row)
+
+
 # ── CSV reader ────────────────────────────────────────────────
 
 def read_csv(path: Path) -> list[dict]:
@@ -382,9 +404,29 @@ def read_csv(path: Path) -> list[dict]:
 # is in its folder: a session with no 03_ file has no published classification,
 # and reading its lap log instead turns every lap into a car.
 #
+# `05_Classification_*` is the same kind of file under the name the publisher
+# uses for the 51 sessions that have no `03_` at all. PR #49 verified 182 of
+# its URLs: same dialect, same 14 fields, same one row per car, and PR #52
+# ran the parser over two of them. It is accepted here so a recovery can
+# reach it. No file of this family exists in `raw/`, so what the local tree
+# selects today does not change.
+#
 # The lookahead is not \b: the separator after the word is usually "_", itself
 # a word character, and \b would reject 03_Classification_Race.CSV.
-CLASSIFICATION_FILE = re.compile(r"^03_(classification|results)(?![a-z0-9])", re.IGNORECASE)
+CLASSIFICATION_FILE = re.compile(
+    r"^(03_(classification|results)|05_classification)(?![a-z0-9])",
+    re.IGNORECASE,
+)
+
+# Within one hour folder the publisher may offer the same classification under
+# two names: `05_Classification_Race.CSV` and `05_Classification_Race_Hour
+# 2.CSV`. `MEASURED` over Le Mans Cup 2018, Paul Ricard and Monza: the plain
+# name carries the dialect the parser reads — 93 header columns over 73-field
+# rows, all 14 fields — and the `_Hour N` variant carries the third dialect,
+# 22 columns spelled `Pos;Number;Driver 1;…`, in which `field(row, "NUMBER")`
+# finds nothing and every row is discarded. Preferring the plain name is
+# preferring the file that can be read at all.
+HOUR_SUFFIXED = re.compile(r"_hour\s*\d+\.csv$", re.IGNORECASE)
 
 
 def is_classification_file(path: Path) -> bool:
@@ -437,7 +479,17 @@ def get_final_classification(classification_dir: Path) -> Path | None:
             return int(m.group(1))
         return 0
 
-    return max(all_csvs, key=hour_key)
+    # Highest hour first; within the same hour, the name without the `_Hour N`
+    # suffix; then the first name alphabetically, folded, so the choice does
+    # not depend on whether the filesystem sorts case-sensitively. Taking the
+    # minimum of a key whose first term is negated keeps the order the
+    # previous `max(..., key=hour_key)` produced, where a tie fell to the
+    # first file of the sorted list.
+    def selection_key(p: Path) -> tuple[int, int, str]:
+        suffixed = 1 if HOUR_SUFFIXED.search(p.name) else 0
+        return (-hour_key(p), suffixed, p.name.casefold())
+
+    return min(all_csvs, key=selection_key)
 
 
 # ── DB helpers ────────────────────────────────────────────────
@@ -794,7 +846,6 @@ def process_session(cur, series_key: str, sess: dict, dry_run: bool) -> dict:
     if dry_run:
         return {"status": "ok_dry", "rows": len(rows), "session_id": session_id}
 
-    is_imsa = (series_key == "IMSA")
     loaded = 0
     # Drivers left unlinked because the name answers to several rows.
     pilotos_ambiguos = 0
@@ -815,7 +866,7 @@ def process_session(cur, series_key: str, sess: dict, dry_run: bool) -> dict:
             continue
 
         # Drivers
-        drivers = extract_drivers_imsa(row) if is_imsa else extract_drivers_wec(row)
+        drivers = extract_drivers(row, series_key)
         driver_ids = []
         for d in drivers:
             drv_id, drv_outcome = upsert_driver(cur, d)

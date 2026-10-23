@@ -68,6 +68,7 @@ KINDS = {
 BY_PREFIX = {
     "03_Classification": CLASSIFICATION_CSV,
     "03_Results":        RESULTS_CSV,
+    "05_Classification": RESULTS_CSV,
     "23_Analysis":       ANALYSIS_CSV,
     "26_Weather":        WEATHER_CSV,
 }
@@ -274,3 +275,56 @@ def test_a_imsa_so_com_clima_fica_de_fora(tmp_path):
 
 def test_raw_inexistente_nao_quebra(tmp_path):
     assert find_classification_sessions(tmp_path / "nao_existe", "ELMS") == []
+
+
+# ── A familia 05_, aceita para que uma recuperacao a alcance ──
+
+# As 51 sessoes contaminadas nao tem `03_` nenhum: o que o publicador oferece
+# para elas chama-se `05_Classification*`. Nenhum arquivo dessa familia existe
+# em `raw/`, entao o que a arvore local seleciona hoje nao muda.
+@pytest.mark.parametrize("nome", [
+    "05_Classification_Race.CSV",
+    "05_Classification_Race_Hour 2.CSV",
+    "05_Classification_Race_Race.CSV",
+    "05_classification_race.csv",
+])
+def test_a_familia_05_e_aceita(nome):
+    assert is_classification_file(Path(nome)) is True
+
+
+@pytest.mark.parametrize("nome", [
+    "05_Results by Hour.CSV",      # existe, mas nao foi verificada aqui
+    "05_Analysis.CSV",
+    "90_Classification_Qualifying Results.CSV",
+    "05Classification_Race.CSV",
+])
+def test_o_que_nao_e_05_classification_continua_fora(nome):
+    assert is_classification_file(Path(nome)) is False
+
+
+def test_dentro_da_mesma_hora_vence_o_nome_sem_sufixo(tmp_path):
+    """
+    As duas grafias da mesma hora nao carregam o mesmo dialeto.
+
+    `MEASURED` na Le Mans Cup 2018, Paul Ricard e Monza: o nome simples traz
+    93 colunas de cabecalho sobre linhas de 73 campos, com os 14 campos que o
+    parser le; o `_Hour N` traz o terceiro dialeto, `Pos;Number;Driver 1;…`,
+    em que `field(row, "NUMBER")` nao encontra nada e toda linha e
+    descartada. Escolher o nome simples e escolher o arquivo legivel.
+    """
+    pasta = escrever(tmp_path / "Hour 2",
+                     "05_Classification_Race.CSV",
+                     "05_Classification_Race_Hour 2.CSV")
+    escolhido = get_final_classification(pasta)
+    assert escolhido is not None
+    assert escolhido.name == "05_Classification_Race.CSV"
+
+
+def test_a_hora_maior_continua_vencendo_o_sufixo(tmp_path):
+    """O desempate e o segundo criterio, nunca o primeiro."""
+    pasta = tmp_path / "classification"
+    escrever(pasta / "Hour 1", "05_Classification_Race.CSV")
+    escrever(pasta / "Hour 2", "05_Classification_Race_Hour 2.CSV")
+    escolhido = get_final_classification(pasta)
+    assert escolhido is not None
+    assert escolhido.parent.name == "Hour 2"
