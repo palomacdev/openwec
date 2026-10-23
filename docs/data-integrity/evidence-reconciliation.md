@@ -35,11 +35,18 @@ IMSA de Watkins Glen, que dois campeonatos publicam sob o mesmo nome.
 
 `MEASURED` (PR #50), por **entrada de catálogo**:
 
-| estado | entradas |
-|---|---:|
-| `FINALITY_CORROBORATED` | **49** |
-| `PARTIAL_OR_DIVERGENT` | **1** |
-| `INDETERMINATE` | **2** |
+| estado | entradas | revisto pela PR #54 |
+|---|---:|---:|
+| `FINALITY_CORROBORATED` | **49** | **50** |
+| `PARTIAL_OR_DIVERGENT` | **1** | **0** |
+| `INDETERMINATE` | **2** | 2 |
+
+`MEASURED` (PR #54): a única entrada `PARTIAL_OR_DIVERGENT` — Monza 2018 —
+fora medida sobre o arquivo da `Hour 1`. O da `Hour 2` da mesma sessão traz
+o líder **+36,438 s** além da nominal e **zero** divergências de voltas
+contra o log, satisfazendo os dois critérios do §9.1. A medição da PR #50
+está preservada em §7.2 daquele documento, junto da correção; a classe
+`PARTIAL_OR_DIVERGENT` ficou **vazia**.
 
 > **`FINALITY_CORROBORATED` significa evidência de classificação posterior
 > à chegada — não prova de homologação definitiva.** A definição integral
@@ -67,7 +74,7 @@ dos dados.
 | **documento** | `historical-classification-source-verification.md`, §3 e §8 nota 3 |
 | **defeito** | a rotina descartava toda linha com menos campos que o cabeçalho (`if len(p) <= max(idx.values()): continue`). Esses arquivos têm **93 colunas no cabeçalho e 73 campos nas linhas**, então **nenhuma linha foi lida** e o conjunto de números saiu vazio — e um conjunto vazio não tem interseção com nada |
 | **correção** | `MEASURED` (PR #50 §7.1 e §7.2): interseção real **28 de 28** (Paul Ricard) e **27 de 27** (Monza) |
-| **interpretação atual** | Paul Ricard: `FINALITY_CORROBORATED`. Monza: `PARTIAL_OR_DIVERGENT` — a fonte casa a sessão, mas o líder termina **288 s antes** da duração nominal e 24 de 27 carros divergem em voltas |
+| **interpretação atual** | Paul Ricard: `FINALITY_CORROBORATED`. Monza: `PARTIAL_OR_DIVERGENT` — a fonte casa a sessão, mas o líder termina **288 s antes** da duração nominal e 24 de 27 carros divergem em voltas. **Revisto pela PR #54**: essa leitura é do arquivo da `Hour 1`; o da `Hour 2` corrobora, e Monza passa a `FINALITY_CORROBORATED` (§1 e §3.3) |
 | **pendência** | a validação do parser para esses arquivos, §4.1 |
 
 `DERIVED`: o mesmo defeito que produziu o falso negativo é o que o §11.1 da
@@ -123,14 +130,15 @@ parser lê e traz os 14 campos. A classe `UNRECOVERABLE` ficou **vazia**.
 
 | caso | estado | por quê |
 |---|---|---|
-| Le Mans Cup 2018, Monza | `PARTIAL_OR_DIVERGENT` | líder 288 s antes da nominal; 24 de 27 carros divergem |
+| ~~Le Mans Cup 2018, Monza~~ | ~~`PARTIAL_OR_DIVERGENT`~~ → **`FINALITY_CORROBORATED`** (PR #54) | a medição era do arquivo da `Hour 1`; o da `Hour 2` traz o líder +36 s da nominal e **zero** divergências |
 | Le Mans Cup 2017, Red Bull Ring (2 entradas, 1 sessão) | `INDETERMINATE` | líder 89 s antes da nominal; `UNKNOWN` se a corrida foi encurtada ou se o arquivo antecede o fim |
 | as 49 corroboradas | corroboradas **como pós-chegada** | `UNKNOWN` se alguma foi revista depois |
 
-`PROPOSED`: as **três entradas de catálogo sem finalidade corroborada** —
-Monza 2018 (1 entrada, `PARTIAL_OR_DIVERGENT`) e Red Bull Ring 2017
-(2 entradas referentes a uma mesma sessão, `INDETERMINATE`) — permaneçam
-fora da primeira reconstrução até que suas incertezas sejam resolvidas.
+`PROPOSED`, revisto pela PR #54: as **duas entradas de catálogo sem
+finalidade corroborada** — Red Bull Ring 2017, que são duas entradas
+referentes a uma mesma sessão, ambas `INDETERMINATE` — permaneçam fora da
+primeira reconstrução até que suas incertezas sejam resolvidas. Monza 2018
+deixa essa lista.
 
 A terceira linha da tabela acima **não** descreve entradas excluídas: ela
 registra o limite do que a corroboração demonstra para as 49 entradas
@@ -138,9 +146,10 @@ registra o limite do que a corroboração demonstra para as 49 entradas
 A ressalva ali é de interpretação — corroborado significa posterior à
 chegada, não homologado (§1, PR #50 §7.3) —, não de elegibilidade.
 
-Contagens preservadas: **49** `FINALITY_CORROBORATED`, **1**
-`PARTIAL_OR_DIVERGENT`, **2** `INDETERMINATE`; total de **52 entradas de
-catálogo**, correspondentes a **51 sessões**.
+Contagens da PR #50, preservadas: **49** `FINALITY_CORROBORATED`, **1**
+`PARTIAL_OR_DIVERGENT`, **2** `INDETERMINATE`. Depois da revisão da PR #54:
+**50 / 0 / 2**. O total não muda — **52 entradas de catálogo**,
+correspondentes a **51 sessões**.
 
 ---
 
@@ -189,10 +198,14 @@ ficou sem referência local.
 | 9 | duas entradas LMC 2018 "sem interseção" | `historical-classification-source-verification.md` §9 | #50 §7.1–7.2 | 28/28 e 27/27 | §2.1 deste documento | validar o parser |
 | 10 | "a classificação final está verificada em 16 entradas" | `historical-classification-source-verification.md` §1 | #50 | 49 corroboradas, 1 divergente, 2 indeterminadas | §1 deste documento | decisão 2 do §4 |
 
+| 11 | Monza 2018 é `PARTIAL_OR_DIVERGENT`: líder −288 s, 24 de 27 carros divergem | `classification-snapshot-finality-assessment.md` §7.2 e §9.3 | #54: a medição é do arquivo da `Hour 1`; o da `Hour 2` traz o líder **+36,438 s** e **0** divergências contra as 1.517 voltas do log | **`FINALITY_CORROBORATED`**, pelo `Hour 2` | nota de correção dentro do §7.2, preservando a medição, e §9.3 tachado e reformulado | nenhuma; o alcance continua "posterior à chegada" |
+| 12 | "a sessão contaminada de Watkins Glen é do WeatherTech" | `classification-snapshot-finality-assessment.md` §7.3 · `evidence-reconciliation.md` §2.2 | #54: a sessão **2721** que guarda as 13.488 linhas é a do **Continental Tire**; 39 de 39 dos seus números casam com a fonte WeatherTech, e a sessão WeatherTech (**2725**) está vazia | o **arquivo** é do WeatherTech, como medido; a **linha de sessão** é a do outro campeonato, por resolução anterior à PR #41 | registrada em `recovery-eligibility-scan.md` §6 | reatribuição de sessão, fora do escopo de recuperação |
+
 `DERIVED`: as linhas 1 a 7 foram **aplicadas nos documentos originais**; as
-8 a 10 são registradas aqui e referenciadas de lá, porque alterar as tabelas
-de resultado da PR #49 apagaria a medição que a PR #50 corrigiu — e é essa
-sequência que se quer preservar.
+8 a 10 e a 12 são registradas aqui e referenciadas de lá, porque alterar as
+tabelas de resultado da PR #49 apagaria a medição que a PR #50 corrigiu — e
+é essa sequência que se quer preservar. A linha 11 foi aplicada no original,
+com a medição anterior intacta ao lado da correção.
 
 ### 5.1 O que não foi alterado, de propósito
 

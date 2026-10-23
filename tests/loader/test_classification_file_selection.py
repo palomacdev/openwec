@@ -328,3 +328,53 @@ def test_a_hora_maior_continua_vencendo_o_sufixo(tmp_path):
     escolhido = get_final_classification(pasta)
     assert escolhido is not None
     assert escolhido.parent.name == "Hour 2"
+
+
+# ── A hora escrita antes da palavra ───────────────────────────
+
+# `MEASURED`: o catalogo da ELMS usa `1H`..`6H` e `1 Hour`/`3 Hours` em 152
+# arquivos, e `raw/` tem seis pastas assim. Sem reconhece-las, `hour_key`
+# devolve 0 para todas e o desempate alfabetico escolhe a PRIMEIRA hora —
+# um retrato do meio da corrida apresentado como classificacao final.
+def test_a_hora_abreviada_na_pasta_e_lida(tmp_path):
+    pasta = tmp_path / "classification"
+    escrever(pasta / "1H", "05_Classification_Race_1H.CSV")
+    escrever(pasta / "6H", "05_Classification_Race_6H.CSV")
+    escolhido = get_final_classification(pasta)
+    assert escolhido is not None
+    assert escolhido.parent.name == "6H"
+
+
+def test_a_hora_por_extenso_antes_da_palavra_e_lida(tmp_path):
+    pasta = tmp_path / "classification"
+    escrever(pasta / "1 Hour", "05_Classification_Race_1 Hour.CSV")
+    escrever(pasta / "2 Hours", "05_Classification_Race_2 Hours.CSV")
+    escrever(pasta / "3 Hours", "05_Classification_Race_3 Hours.CSV")
+    escolhido = get_final_classification(pasta)
+    assert escolhido is not None
+    assert escolhido.parent.name == "3 Hours"
+
+
+def test_a_corrida_numerada_nao_vira_hora(tmp_path):
+    """
+    `Race 1` e uma corrida, nao uma hora, e `Race 2` tambem nao.
+
+    A grafia so e lida quando a pasta nao e outra coisa, ou quando o numero
+    e a ultima coisa do nome antes da extensao.
+    """
+    pasta = tmp_path / "classification"
+    escrever(pasta / "Race 1", "05_Classification_Race 1.CSV")
+    escrever(pasta / "Race 2", "05_Classification_Race 2.CSV")
+    escolhido = get_final_classification(pasta)
+    assert escolhido is not None
+    assert escolhido.name == "05_Classification_Race 1.CSV"
+
+
+def test_hour_n_continua_vencendo_a_grafia_abreviada(tmp_path):
+    """As duas grafias convivem, e a comparacao e numerica dos dois lados."""
+    pasta = tmp_path / "classification"
+    escrever(pasta / "2H", "05_Classification_Race_2H.CSV")
+    escrever(pasta / "Hour 4", "05_Classification_Race_Hour 4.CSV")
+    escolhido = get_final_classification(pasta)
+    assert escolhido is not None
+    assert escolhido.parent.name == "Hour 4"
