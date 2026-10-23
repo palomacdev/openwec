@@ -215,6 +215,24 @@ foi investigada nesta PR.
 download buscou `03_`, `23_` e `26_`, e esses eventos publicam a
 classificação sob `05_`.
 
+**Correção à distribuição acima (PR #50).** A contagem de **51 sessões**
+permanece válida; a **atribuição do arquivo** a uma delas não. O
+`03_Results.CSV` associado à sessão contaminada de Watkins Glen pertence
+ao campeonato **Continental Tire**, não ao **WeatherTech** — são dois
+campeonatos que publicam a mesma data sob nomes equivalentes. A fonte
+correspondente à sessão WeatherTech é **`05_Results by Hour.CSV`**, e sua
+correspondência foi corroborada com **39/39 carros** da análise local. Essa
+classificação **tem evidência de ser posterior à chegada, não comprovação
+de homologação definitiva**. Detalhe em §7.3 de
+[classification-snapshot-finality-assessment.md](classification-snapshot-finality-assessment.md)
+e rastreabilidade em §2.2 e §5 de
+[evidence-reconciliation.md](evidence-reconciliation.md).
+
+`DERIVED`: lida com a correção, a distribuição por família passa a ser
+**51 sessões sob `05_`** — 50 em `05_Classification*` e 1 em
+`05_Results by Hour*`. A medição da PR #48 fica registrada como foi feita;
+não foi reescrita.
+
 `MEASURED` (PR #49): as **182 URLs** dessas fontes responderam `HTTP 200`
 com `text/csv`, decodificam em UTF-8, usam `;` e trazem **os 14 campos que
 o parser lê** — zero ausências, zero falhas.

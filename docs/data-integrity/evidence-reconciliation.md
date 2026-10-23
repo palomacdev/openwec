@@ -127,8 +127,20 @@ parser lê e traz os 14 campos. A classe `UNRECOVERABLE` ficou **vazia**.
 | Le Mans Cup 2017, Red Bull Ring (2 entradas, 1 sessão) | `INDETERMINATE` | líder 89 s antes da nominal; `UNKNOWN` se a corrida foi encurtada ou se o arquivo antecede o fim |
 | as 49 corroboradas | corroboradas **como pós-chegada** | `UNKNOWN` se alguma foi revista depois |
 
-`PROPOSED`: as três primeiras linhas fiquem fora de qualquer primeira
-reconstrução.
+`PROPOSED`: as **três entradas de catálogo sem finalidade corroborada** —
+Monza 2018 (1 entrada, `PARTIAL_OR_DIVERGENT`) e Red Bull Ring 2017
+(2 entradas referentes a uma mesma sessão, `INDETERMINATE`) — permaneçam
+fora da primeira reconstrução até que suas incertezas sejam resolvidas.
+
+A terceira linha da tabela acima **não** descreve entradas excluídas: ela
+registra o limite do que a corroboração demonstra para as 49 entradas
+`FINALITY_CORROBORATED`, que seguem elegíveis à estratégia de reconstrução.
+A ressalva ali é de interpretação — corroborado significa posterior à
+chegada, não homologado (§1, PR #50 §7.3) —, não de elegibilidade.
+
+Contagens preservadas: **49** `FINALITY_CORROBORATED`, **1**
+`PARTIAL_OR_DIVERGENT`, **2** `INDETERMINATE`; total de **52 entradas de
+catálogo**, correspondentes a **51 sessões**.
 
 ---
 
@@ -173,7 +185,7 @@ ficou sem referência local.
 | 5 | "as 51 sessões ficariam sem classificação, que é o estado correto: a fonte não publica uma para elas" | `recovery-plan.md` Fase 1, decisão 2 | #48 | a fonte publica; o download não a buscou | decisão 2 tachada e reformulada | decisão: obter ou não |
 | 6 | "O conteúdo de classificação nunca existiu para essas sessões" | `recovery-plan.md` Fase 4 | #48–#50 | existe e responde | parágrafo reescrito citando a avaliação anterior | decisão sobre o destino |
 | 7 | "essas correções sejam aplicadas quando a decisão 1 der o seu resultado" | `historical-recovery-decision-framework.md` §13 | #49: as URLs responderam | a condição foi satisfeita | nota de que esta PR as aplicou | — |
-| 8 | subgrupo **S1**: "1 sessão, fonte `03_Results`" | `historical-recovery-decision-framework.md` §4.3 · `historical-classification-source-verification.md` §3 | #50 §7.3: campeonato errado | a contagem está certa; a família é `05_Results by Hour` | novo §13.1 no framework | incluir IMSA em `load_laps` |
+| 8 | subgrupo **S1**: "1 sessão, fonte `03_Results`" | `historical-recovery-decision-framework.md` §4.3 · `historical-classification-source-verification.md` §3 | #50 §7.3: campeonato errado | a contagem está certa; a família é `05_Results by Hour` | novo §13.1 no framework e correção explícita no §3.4.1 de `historical-recovery-assessment.md`, preservando a medição da PR #48 | incluir IMSA em `load_laps` |
 | 9 | duas entradas LMC 2018 "sem interseção" | `historical-classification-source-verification.md` §9 | #50 §7.1–7.2 | 28/28 e 27/27 | §2.1 deste documento | validar o parser |
 | 10 | "a classificação final está verificada em 16 entradas" | `historical-classification-source-verification.md` §1 | #50 | 49 corroboradas, 1 divergente, 2 indeterminadas | §1 deste documento | decisão 2 do §4 |
 
