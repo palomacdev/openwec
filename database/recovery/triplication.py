@@ -10,8 +10,22 @@ conflicted.
 
 This module decides nothing about the database. It reads, and it says, for
 each entry, which row could be kept, which could be discarded, and what
-stands in the way. Read only: every statement here is a `SELECT`, and the
-CLI opens its connection with `default_transaction_read_only`.
+stands in the way.
+
+## What "read only" covers here
+
+**The historical database** and **the source files** are read and never
+written: every statement is a `SELECT`, the CLI opens its connection with
+`default_transaction_read_only`, and the published CSV is opened for reading
+by `read_csv` and nothing else.
+
+`--json` is the one thing that writes, and it writes **one local report
+file**, chosen by whoever runs the command. It is written after the database
+connection is already closed, so a path that does not exist or cannot be
+written leaves the database exactly as a run without `--json` would. The
+recommended destination is a scratch directory outside the repository and
+outside `raw/` — the report carries measurements of a moment, not something
+the project keeps.
 
 ## The rule, and its cost
 
@@ -81,7 +95,17 @@ COMPLEMENTARY_METADATA_ON_DISCARDED = "COMPLEMENTARY_METADATA_ON_DISCARDED"
 STATUS_DIVERGES_FROM_SOURCE = "STATUS_DIVERGES_FROM_SOURCE"
 SOURCE_REVISION_DIVERGES = "SOURCE_REVISION_DIVERGES"
 SOURCE_UNVERIFIABLE = "SOURCE_UNVERIFIABLE"
+SOURCE_COVERAGE_INCOMPLETE = "SOURCE_COVERAGE_INCOMPLETE"
 DRIVER_IDENTITY_SPLIT = "DRIVER_IDENTITY_SPLIT"
+OUTSIDE_TRIPLICATION_CLASS = "OUTSIDE_TRIPLICATION_CLASS"
+
+# The premise the criterion was derived under. Everything measured about
+# this class — which row carries the laps, where the metadata sits, that
+# driver links exist on all three rows or none — was measured over entries
+# with exactly three rows. An entry with one, two or four does not belong to
+# the population, and an answer for it would be an answer to a question
+# nobody asked.
+ROWS_PER_ENTRY = 3
 
 # Columns whose disagreement is a conflict of fact. `tyre_supplier` is not
 # here: it is never contradicted, only absent, and absence is handled as
@@ -211,6 +235,16 @@ def assess_entry(session_id: int, number: str, linhas: list[dict],
     """
     ids = sorted(l["car_id"] for l in linhas)
     e = EntryAssessment(session_id=session_id, number=number, car_ids=ids)
+    e.evidence["linhas"] = len(linhas)
+
+    if len(linhas) != ROWS_PER_ENTRY:
+        # The premise failed, so the criterion does not apply and no answer
+        # is given. Everything this module knows was measured over entries
+        # with exactly three rows.
+        e.verdict = BLOCKED
+        e.reasons.append(OUTSIDE_TRIPLICATION_CLASS)
+        e.evidence["linhas_esperadas"] = ROWS_PER_ENTRY
+        return e
 
     divergem = material_divergence(linhas)
     if divergem:
@@ -254,13 +288,24 @@ def assess_entry(session_id: int, number: str, linhas: list[dict],
 
 # ── Session-level impediments ────────────────────────────────
 
-def status_divergences(cur, session_id: int, source_rows: list[dict]) -> list[dict]:
+def source_comparison(cur, session_id: int, source_rows: list[dict]) -> dict:
     """
-    Where the stored status disagrees with the file, read with today's parser.
+    The database against the file, with every row of both sides accounted for.
 
-    Separate from `MATERIAL_DIVERGENCE` by design: this is the database
-    against the source, and that is the three ingestions against each other.
-    A session can have either on its own.
+    Two different findings come out of here and are reported apart.
+
+    **Divergence** is the two sides describing the same car differently —
+    the status defect PR #52 fixed, read back with today's parser. It is
+    also separate from `MATERIAL_DIVERGENCE`, which is the three ingestions
+    disagreeing with each other rather than with the file.
+
+    **Incomplete coverage** is the two sides not describing the same set of
+    cars: a number the file publishes and the database does not hold, one
+    the database holds and the file does not publish, or one the file
+    publishes twice. None of these is a status mismatch, and none may be
+    skipped — a comparison that silently drops the rows it cannot pair
+    reports agreement it never established. That is the shape of the defect
+    PR #49 made and PR #50 had to correct.
     """
     cur.execute("""
         SELECT DISTINCT ON (c.number) c.number, r.status::text
@@ -269,18 +314,42 @@ def status_divergences(cur, session_id: int, source_rows: list[dict]) -> list[di
     """, (session_id,))
     armazenado = dict(cur.fetchall())
 
+    numeros_fonte = [r.get("NUMBER", "").strip() for r in source_rows]
+    vazios = sum(1 for n in numeros_fonte if not n)
+    repetidos = sorted({n for n in numeros_fonte
+                        if n and numeros_fonte.count(n) > 1})
+
     divergem = []
+    comparados = 0
     for row in source_rows:
         numero = row.get("NUMBER", "").strip()
-        if numero not in armazenado:
+        if not numero or numero not in armazenado or numero in repetidos:
             continue
+        comparados += 1
         esperado = normalize_status(field(row, "STATUS"))
         if esperado != armazenado[numero]:
             divergem.append({"number": numero,
                              "bruto": field(row, "STATUS"),
                              "fonte": esperado,
                              "banco": armazenado[numero]})
-    return divergem
+
+    so_na_fonte = sorted({n for n in numeros_fonte
+                          if n and n not in armazenado})
+    so_no_banco = sorted(n for n in armazenado
+                         if n not in set(numeros_fonte))
+
+    return {
+        "status_divergentes": divergem,
+        "numeros_comparados": comparados,
+        "numeros_na_fonte": len(numeros_fonte),
+        "numeros_no_banco": len(armazenado),
+        "numeros_so_na_fonte": so_na_fonte,
+        "numeros_so_no_banco": so_no_banco,
+        "numeros_repetidos_na_fonte": repetidos,
+        "linhas_da_fonte_sem_numero": vazios,
+        "cobertura_completa": not (so_na_fonte or so_no_banco or repetidos
+                                   or vazios),
+    }
 
 
 def driver_identity_candidates(cur, session_id: int) -> list[dict]:
@@ -366,10 +435,15 @@ def assess_session(cur, session_id: int,
         s.reasons.append(SOURCE_UNVERIFIABLE)
         s.verdict = worst(s.verdict, SPECIAL)
     else:
-        divergem = status_divergences(cur, session_id, source_rows)
-        if divergem:
+        comparacao = source_comparison(cur, session_id, source_rows)
+        s.evidence["comparacao_com_a_fonte"] = comparacao
+        if comparacao["status_divergentes"]:
             s.reasons.append(STATUS_DIVERGES_FROM_SOURCE)
-            s.evidence["status_divergentes"] = divergem
+            s.verdict = worst(s.verdict, SPECIAL)
+        if not comparacao["cobertura_completa"]:
+            # Not the same finding as a divergence, and not a pass: what was
+            # not compared was not found to agree.
+            s.reasons.append(SOURCE_COVERAGE_INCOMPLETE)
             s.verdict = worst(s.verdict, SPECIAL)
 
     candidatos = driver_identity_candidates(cur, session_id)
@@ -402,7 +476,10 @@ def main() -> int:
     ap.add_argument("--dbname", default="openwec")
     ap.add_argument("--user", default="openwec")
     ap.add_argument("--password", default="")
-    ap.add_argument("--json", type=Path)
+    ap.add_argument("--json", type=Path,
+                    help="write the report here; a scratch path outside the "
+                         "repository and outside raw/ is the recommended "
+                         "destination")
     args = ap.parse_args()
 
     rows = read_csv(args.csv) if args.csv else None
@@ -415,6 +492,8 @@ def main() -> int:
     finally:
         conn.rollback()
         conn.close()
+    # From here on there is no database. Whatever the report does next, the
+    # instance has already been left as it was found.
 
     contagens = s.counts()
     print(f"sessao {s.session_id}: {s.verdict}")
@@ -429,10 +508,27 @@ def main() -> int:
                   f"  canonico={e.canonical} descartar={e.discarded}"
                   f"  complementar={e.complementary or ''}")
 
-    if args.json:
-        args.json.write_text(json.dumps(s.as_dict(), ensure_ascii=False,
-                                        indent=2, default=str),
-                             encoding="utf-8")
+    return write_report(s, args.json)
+
+
+def write_report(s: SessionAssessment, destino: Path | None) -> int:
+    """
+    The one write this module does, and the only thing it can cost.
+
+    A destination that does not exist, or cannot be written, is reported and
+    changes the exit code. It cannot change the database: the connection was
+    closed before this is reached.
+    """
+    if destino is None:
+        return 0
+    try:
+        destino.write_text(
+            json.dumps(s.as_dict(), ensure_ascii=False, indent=2, default=str),
+            encoding="utf-8")
+    except OSError as exc:
+        print(f"o relatorio nao pode ser escrito em {destino}: {exc}")
+        print("o banco nao foi tocado: a conexao ja estava fechada")
+        return 1
     return 0
 
 

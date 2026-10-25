@@ -143,7 +143,41 @@ soma de voltas por leva: 3.109 / 2.763 / 2.763
 discorda. `UNKNOWN`: qual revisão vale. Não é deduplicação — é escolha de
 revisão, e fica **bloqueada**.
 
-### 3.3 Pilotos: candidatos, nunca fusões
+### 3.3 A premissa da classe, verificada e não suposta
+
+Tudo o que este documento mede — qual linha carrega as voltas, onde o
+metadado fica, que os vínculos de piloto existem nas três ou em nenhuma —
+foi medido sobre entradas de **exatamente três linhas**.
+
+Uma entrada com uma, duas ou quatro **não pertence à população**, e o
+critério não se aplica a ela. O módulo verifica isso antes de qualquer outra
+coisa e devolve `OUTSIDE_TRIPLICATION_CLASS` com `BLOCKED`, sem canônico e
+sem avaliar divergência, portador ou metadado. `DERIVED`: **nenhuma entrada
+fora da premissa pode sair `ELIGIBLE`**, e responder por ela seria responder
+a uma pergunta que ninguém fez.
+
+### 3.4 Cobertura da fonte, separada de divergência de status
+
+A comparação com o arquivo responde a **duas** perguntas, e elas não se
+confundem:
+
+| achado | o que é |
+|---|---|
+| `STATUS_DIVERGES_FROM_SOURCE` | os dois lados descrevem o mesmo carro de modo diferente |
+| `SOURCE_COVERAGE_INCOMPLETE` | os dois lados **não descrevem o mesmo conjunto** de carros |
+
+A cobertura é incompleta quando a fonte publica um número que o banco não
+tem, o banco tem um que a fonte não publica, a fonte publica o mesmo número
+duas vezes, ou traz linha sem número. Nenhum desses casos é divergência de
+status, e **nenhum pode ser pulado**.
+
+`DERIVED`: uma comparação que descarta em silêncio o que não consegue parear
+relata uma concordância que nunca estabeleceu. É a forma exata do defeito que
+a PR #49 cometeu — `if len(p) <= max(idx.values()): continue` fez a rotina
+ler zero linhas e reportar "sem interseção" — e que a PR #50 teve de
+corrigir. Uma sessão com cobertura incompleta **não sai `ELIGIBLE`**.
+
+### 3.5 Pilotos: candidatos, nunca fusões
 
 A detecção usa `full_name_key`, a mesma dobra que `row_identity` já aplica
 para dizer que duas grafias são o mesmo nome — emprestada aqui para
@@ -167,39 +201,105 @@ recusam a fusão automática, e nada aqui a contorna.
 
 ## 4. A matriz
 
-| categoria | sessões |
-|---|---:|
-| **ELIGIBLE** | **1.038** |
-| **SPECIAL** | **276** |
-| **BLOCKED** | **1** |
+`MEASURED`: produzida **pelo próprio módulo**, rodando `assess_session` sobre
+as 1.315 sessões — não por um roteiro à parte. É a razão de ela não coincidir
+com a tabela da investigação anterior; o §4.2 reconcilia as duas.
 
-Combinações reais de motivo:
+| categoria | sessões | entradas |
+|---|---:|---:|
+| **ELIGIBLE** | **982** | **38.557** |
+| **SPECIAL** | **240** | **67** |
+| **BLOCKED** | **93** | **267** |
+| total | 1.315 | 38.891 |
+
+Motivos, por sessão, com sobreposição:
 
 ```
-115  sem fonte local
- 79  voltas duplicadas
- 55  status divergente
- 14  status + piloto
-  5  voltas duplicadas + sem fonte
-  4  voltas duplicadas + piloto
-  4  voltas duplicadas + status + piloto
-  1  contradição entre levas
+120  SOURCE_UNVERIFIABLE
+ 92  MULTIPLE_LAP_CARRIERS
+ 73  STATUS_DIVERGES_FROM_SOURCE
+ 56  COMPLEMENTARY_METADATA_ON_DISCARDED
+ 22  DRIVER_IDENTITY_SPLIT
+  1  MATERIAL_DIVERGENCE
+  1  SOURCE_REVISION_DIVERGES
+  0  SOURCE_COVERAGE_INCOMPLETE
+  0  OUTSIDE_TRIPLICATION_CLASS
 ```
 
-Perfil das 1.038 elegíveis:
+Combinações reais:
+
+```
+982  (nenhum)
+115  SOURCE_UNVERIFIABLE
+ 79  MULTIPLE_LAP_CARRIERS
+ 56  COMPLEMENTARY_METADATA_ON_DISCARDED
+ 55  STATUS_DIVERGES_FROM_SOURCE
+ 14  DRIVER_IDENTITY_SPLIT + STATUS_DIVERGES_FROM_SOURCE
+  5  MULTIPLE_LAP_CARRIERS + SOURCE_UNVERIFIABLE
+  4  DRIVER_IDENTITY_SPLIT + MULTIPLE_LAP_CARRIERS
+  4  DRIVER_IDENTITY_SPLIT + MULTIPLE_LAP_CARRIERS + STATUS_DIVERGES_FROM_SOURCE
+  1  MATERIAL_DIVERGENCE + SOURCE_REVISION_DIVERGES
+```
+
+`MEASURED`: as entradas conferem com as medições do §2 — as **67** `SPECIAL`
+são exatamente as de metadado complementar, e as **267** `BLOCKED` são as
+**225** com dois portadores mais as **42** da sessão 1670.
+
+### 4.1 A regra de severidade
+
+Vale para a entrada e para a sessão, e é a mesma nos dois níveis: **o pior
+vence**.
+
+| verdito | quando |
+|---|---|
+| `BLOCKED` | a entrada não pertence à classe, as três levas se contradizem, ou mais de um `car_id` carrega voltas — **nenhum canônico é devolvido** |
+| `SPECIAL` | há canônico, mas alguma coisa precisa de decisão separada antes de qualquer consolidação |
+| `ELIGIBLE` | há canônico e nada pendente |
+
+A sessão recebe o pior verdito das suas entradas, e depois os impedimentos
+de sessão só podem piorá-lo. `DERIVED`: uma sessão `BLOCKED` pode ter a
+maioria das entradas `ELIGIBLE` — é o caso da 855, com 33 de 35.
+
+### 4.2 Reconciliação com a matriz da investigação anterior
+
+| | investigação | módulo | por quê |
+|---|---:|---:|---|
+| ELIGIBLE | 1.038 | **982** | −56: o metadado complementar não era contado como impedimento de sessão, só de entrada |
+| SPECIAL | 276 | **240** | −92 para `BLOCKED`, +56 vindos de `ELIGIBLE` |
+| BLOCKED | 1 | **93** | +92: a investigação tratava "voltas duplicadas" como especial; o módulo não devolve canônico nesse caso, e isso é bloqueio |
+
+`DERIVED`: a divergência é de **regra**, não de medição — nenhuma contagem
+bruta mudou. As 92 sessões com voltas duplicadas, as 56 com metadado
+complementar e a 1 com contradição são as mesmas de antes. A classificação
+do módulo é a que vale, porque é a que o código aplica.
+
+**A sessão 855 é `BLOCKED`**, não `SPECIAL` como a investigação registrou.
+Ela tem dois números — `007` e `009` — com voltas em dois `car_id`, e para
+esses o módulo não escolhe nada.
+
+### 4.3 Dois guardas que não encontraram nada
+
+`SOURCE_COVERAGE_INCOMPLETE` e `OUTSIDE_TRIPLICATION_CLASS` aparecem **zero
+vezes**. `DERIVED`: nas 1.195 sessões com arquivo local, a fonte e o banco
+cobrem exatamente o mesmo conjunto de números; e toda entrada da classe tem
+mesmo três linhas. São duas afirmações verificadas, não duas verificações
+ausentes — e é essa a diferença que o §3.4 explica.
+
+Perfil das 982 elegíveis (as 56 de metadado complementar saíram desta lista
+e estão em `SPECIAL`):
 
 ```
 ELMS      Qualifying 242 · Test 125 · Practice 106 · Other 57 · Race 30
 LEMANSCUP Qualifying 117 · Practice 110 · Test 99 · Other 20
-ALMS      Practice 26 · Qualifying 25 · Test 17 · Race 12 · Other 10
+ALMS      Qualifying 14 · Race 8 · Practice 6 · Test 4 · Other 2
 IMSA      Practice 9 · Other 9 · Qualifying 5 · Race 3 · WarmUp 1
 WEC       Hyperpole 8 · Qualifying 7
 ```
 
-`MEASURED`: **45 das 1.038 são corridas, e nenhuma é WEC.** Das 105 corridas
-WEC do acervo, **8 estão nesta classe**, e **as 8 são `SPECIAL`** — todas com
-voltas duplicadas e identidade de piloto partida; quatro delas também com
-status divergente:
+`MEASURED`: **41 das 982 são corridas, e nenhuma é WEC.** Das 105 corridas
+WEC do acervo, **8 estão nesta classe**, e **as 8 são `BLOCKED`** — todas têm
+voltas em mais de um `car_id`, e com isso nenhum canônico é devolvido para os
+números afetados:
 
 ```
 772 · 789 · 799 · 809 · 819 · 829 · 845 · 855
@@ -288,10 +388,31 @@ contraexemplo.
 
 ---
 
-## 6. O que esta avaliação não faz
+## 6. O contrato de somente leitura
 
-1. **Não escreve.** Conexão somente leitura; todos os comandos são `SELECT`,
-   e um teste afirma isso sobre as consultas emitidas.
+O que a proteção cobre, e o que não precisa cobrir:
+
+| | |
+|---|---|
+| **banco histórico** | lido e nunca escrito: todo comando é `SELECT`, a conexão abre com `default_transaction_read_only`, e um teste afirma isso sobre as consultas emitidas |
+| **arquivos de origem** | abertos por `read_csv` para leitura e nada mais; `raw/` não é tocado |
+| **`--json`** | **escreve um arquivo local**, escolhido por quem roda o comando |
+
+`DERIVED`: o relatório é escrito **depois que a conexão já foi fechada**. Um
+caminho inexistente ou sem permissão devolve saída 1, imprime o motivo e diz
+em voz alta que o banco não foi tocado — e o banco fica como ficaria numa
+execução sem `--json`.
+
+`PROPOSED`: o destino recomendado é um **diretório temporário fora do
+repositório e fora de `raw/`**. O relatório carrega a medição de um momento,
+não algo que o projeto guarda.
+
+---
+
+## 7. O que esta avaliação não faz
+
+1. **Não escreve no banco nem em `raw/`.** A única escrita é o relatório
+   local do `--json`, descrita no §6.
 2. **Não deduplica nada.** Diz qual linha *poderia* ficar.
 3. **Não escolhe** quando dois `car_id` carregam voltas.
 4. **Não funde pilotos**, por nome ou por qualquer outro critério.
@@ -299,19 +420,24 @@ contraexemplo.
 6. **Não corrige** os 321 status nem decide a revisão da sessão 1670.
 7. **Não propõe** alteração de `session_at`.
 8. **Não gera export** para ninguém.
+9. **Não devolve canônico** para uma entrada fora da premissa de três
+   linhas, nem quando a cobertura da fonte está incompleta.
 
 ---
 
-## 7. Reproduzir
+## 8. Reproduzir
 
 ```bash
 python -m database.recovery.triplication \
   --session-id 855 \
   --csv "raw/wec/.../06_Hour 6/03_Classification_Race_Hour 6.CSV" \
   --host 127.0.0.1 --port 5433 --dbname openwec --user openwec \
-  --password "$DB_PASSWORD" --json 855.json
+  --password "$DB_PASSWORD" --json /tmp/openwec/855.json
 ```
 
 Sem `--csv` o status não é conferido, e a sessão recebe
 `SOURCE_UNVERIFIABLE` — não conferir não é o mesmo que conferir e não achar
-nada. Não há modo de escrita.
+nada.
+
+O `--json` é a única escrita, e vai para onde se mandar; o §6 recomenda um
+diretório temporário fora do repositório. Não há modo de escrita no banco.

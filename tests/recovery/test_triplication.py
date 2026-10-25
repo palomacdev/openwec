@@ -26,6 +26,9 @@ from database.recovery.triplication import (  # noqa: E402
     ELIGIBLE,
     MATERIAL_DIVERGENCE,
     MULTIPLE_LAP_CARRIERS,
+    OUTSIDE_TRIPLICATION_CLASS,
+    ROWS_PER_ENTRY,
+    SOURCE_COVERAGE_INCOMPLETE,
     SOURCE_REVISION_DIVERGES,
     SOURCE_UNVERIFIABLE,
     SPECIAL,
@@ -35,8 +38,9 @@ from database.recovery.triplication import (  # noqa: E402
     complementary_metadata,
     driver_identity_candidates,
     material_divergence,
-    status_divergences,
+    source_comparison,
     worst,
+    write_report,
 )
 
 from tests.recovery.test_recovery_guard import CursorFalso  # noqa: E402
@@ -257,8 +261,10 @@ def test_o_status_divergente_e_um_impedimento_proprio():
     assert s.verdict == SPECIAL
     assert STATUS_DIVERGES_FROM_SOURCE in s.reasons
     assert MATERIAL_DIVERGENCE not in s.reasons
-    assert s.evidence["status_divergentes"][0]["banco"] == "Classified"
-    assert s.evidence["status_divergentes"][0]["fonte"] == "Not Classified"
+    divergentes = s.evidence["comparacao_com_a_fonte"]["status_divergentes"]
+    assert divergentes[0]["banco"] == "Classified"
+    assert divergentes[0]["fonte"] == "Not Classified"
+    assert SOURCE_COVERAGE_INCOMPLETE not in s.reasons
 
 
 def test_a_revisao_da_fonte_e_outro_impedimento():
@@ -337,15 +343,12 @@ def test_o_recorte_do_nome_nao_separa_a_mesma_pessoa():
 
 def test_not_classified_e_comparado_com_o_parser_corrigido():
     cur = CursorFalso([[("7", "Classified")]])
-    div = status_divergences(cur, 855, [{"NUMBER": "7", "STATUS": "Not classified"}])
-    assert div == [{"number": "7", "bruto": "Not classified",
-                    "fonte": "Not Classified", "banco": "Classified"}]
-
-
-def test_o_numero_ausente_do_banco_nao_conta():
-    cur = CursorFalso([[("7", "Classified")]])
-    assert status_divergences(cur, 855,
-                              [{"NUMBER": "99", "STATUS": "DNF"}]) == []
+    c = source_comparison(cur, 855, [{"NUMBER": "7", "STATUS": "Not classified"}])
+    assert c["status_divergentes"] == [{"number": "7", "bruto": "Not classified",
+                                        "fonte": "Not Classified",
+                                        "banco": "Classified"}]
+    assert c["cobertura_completa"] is True
+    assert c["numeros_comparados"] == 1
 
 
 def test_nada_e_escrito_em_consulta_alguma():
@@ -353,3 +356,175 @@ def test_nada_e_escrito_em_consulta_alguma():
     assess_session(cur, 855, source_rows=[{"NUMBER": "7", "STATUS": "Classified"}])
     for sql, _ in cur.executados:
         assert sql.upper().lstrip().startswith(("SELECT", "WITH")), sql
+
+
+# ── A premissa da classe ──────────────────────────────────────
+
+def test_a_classe_e_de_tres_linhas_por_entrada():
+    assert ROWS_PER_ENTRY == 3
+
+
+@pytest.mark.parametrize("quantas", [1, 2, 4, 5])
+def test_fora_da_premissa_nao_existe_elegivel(quantas):
+    """
+    Tudo o que este modulo sabe foi medido sobre entradas de tres linhas.
+
+    Com uma, duas ou quatro, a entrada nao pertence a populacao, e responder
+    por ela seria responder a uma pergunta que ninguem fez.
+    """
+    linhas = [linha(10 * (i + 1)) for i in range(quantas)]
+    e = assess_entry(855, "7", linhas, portadores=[10])
+    assert e.verdict == BLOCKED
+    assert OUTSIDE_TRIPLICATION_CLASS in e.reasons
+    assert e.canonical is None
+    assert e.discarded == []
+    assert e.evidence["linhas"] == quantas
+    assert e.evidence["linhas_esperadas"] == ROWS_PER_ENTRY
+
+
+def test_fora_da_premissa_nao_se_avalia_mais_nada():
+    """Nem divergencia material, nem portador, nem metadado complementar."""
+    linhas = [linha(10, laps_completed=77, tyre_supplier="Michelin"),
+              linha(20)]
+    e = assess_entry(1670, "10", linhas, portadores=[10, 20])
+    assert e.reasons == [OUTSIDE_TRIPLICATION_CLASS]
+    assert "colunas_divergentes" not in e.evidence
+    assert e.complementary == {}
+
+
+def test_a_sessao_fora_da_premissa_nao_passa():
+    linhas = [linha(10), linha(20)]
+    cur = cursor_de_sessao(linhas, {"7": [10]}, status=[("7", "Classified")])
+    s = assess_session(cur, 999, source_rows=[{"NUMBER": "7", "STATUS": "Classified"}])
+    assert s.verdict == BLOCKED
+    assert OUTSIDE_TRIPLICATION_CLASS in s.reasons
+    assert s.counts() == {ELIGIBLE: 0, SPECIAL: 0, BLOCKED: 1}
+
+
+def test_uma_entrada_fora_da_premissa_contamina_a_sessao():
+    linhas = tres() + [linha(40, number="9"), linha(50, number="9")]
+    cur = cursor_de_sessao(linhas, {"7": [20], "9": [40]},
+                           status=[("7", "Classified"), ("9", "Classified")])
+    s = assess_session(cur, 999, source_rows=[])
+    assert s.verdict == BLOCKED
+    assert s.counts() == {ELIGIBLE: 1, SPECIAL: 0, BLOCKED: 1}
+
+
+# ── Cobertura da fonte ────────────────────────────────────────
+
+def comparar(banco, fonte):
+    return source_comparison(CursorFalso([banco]), 855, fonte)
+
+
+def test_cobertura_completa_quando_os_dois_lados_batem():
+    c = comparar([("7", "Classified"), ("9", "Classified")],
+                 [{"NUMBER": "7", "STATUS": "Classified"},
+                  {"NUMBER": "9", "STATUS": "Classified"}])
+    assert c["cobertura_completa"] is True
+    assert c["numeros_comparados"] == 2
+    assert c["status_divergentes"] == []
+
+
+def test_o_numero_so_na_fonte_e_registrado():
+    """
+    Antes, uma linha que o banco nao tinha era simplesmente pulada.
+
+    Uma comparacao que descarta em silencio o que nao consegue parear
+    relata uma concordancia que nunca estabeleceu — a forma exata do defeito
+    que a PR #49 cometeu e a PR #50 teve de corrigir.
+    """
+    c = comparar([("7", "Classified")],
+                 [{"NUMBER": "7", "STATUS": "Classified"},
+                  {"NUMBER": "99", "STATUS": "DNF"}])
+    assert c["numeros_so_na_fonte"] == ["99"]
+    assert c["cobertura_completa"] is False
+    assert c["numeros_comparados"] == 1
+
+
+def test_o_numero_so_no_banco_e_registrado():
+    c = comparar([("7", "Classified"), ("88", "Classified")],
+                 [{"NUMBER": "7", "STATUS": "Classified"}])
+    assert c["numeros_so_no_banco"] == ["88"]
+    assert c["cobertura_completa"] is False
+
+
+def test_o_numero_repetido_na_fonte_e_registrado_e_nao_comparado():
+    c = comparar([("7", "Classified")],
+                 [{"NUMBER": "7", "STATUS": "Classified"},
+                  {"NUMBER": "7", "STATUS": "DNF"}])
+    assert c["numeros_repetidos_na_fonte"] == ["7"]
+    assert c["cobertura_completa"] is False
+    assert c["numeros_comparados"] == 0
+    assert c["status_divergentes"] == []
+
+
+def test_a_linha_da_fonte_sem_numero_e_registrada():
+    c = comparar([("7", "Classified")],
+                 [{"NUMBER": "7", "STATUS": "Classified"},
+                  {"NUMBER": "", "STATUS": "DNF"}])
+    assert c["linhas_da_fonte_sem_numero"] == 1
+    assert c["cobertura_completa"] is False
+
+
+def test_as_duas_grandezas_sao_contadas():
+    c = comparar([("7", "Classified"), ("88", "Classified")],
+                 [{"NUMBER": "7", "STATUS": "Classified"},
+                  {"NUMBER": "99", "STATUS": "DNF"}])
+    assert c["numeros_na_fonte"] == 2
+    assert c["numeros_no_banco"] == 2
+    assert c["numeros_so_na_fonte"] == ["99"]
+    assert c["numeros_so_no_banco"] == ["88"]
+
+
+def test_cobertura_incompleta_impede_elegivel():
+    cur = cursor_de_sessao(tres(), {"7": [20]}, status=[("7", "Classified")])
+    s = assess_session(cur, 855,
+                       source_rows=[{"NUMBER": "7", "STATUS": "Classified"},
+                                    {"NUMBER": "99", "STATUS": "DNF"}])
+    assert s.verdict == SPECIAL
+    assert SOURCE_COVERAGE_INCOMPLETE in s.reasons
+    assert STATUS_DIVERGES_FROM_SOURCE not in s.reasons
+    assert s.evidence["comparacao_com_a_fonte"]["numeros_so_na_fonte"] == ["99"]
+
+
+def test_divergencia_e_cobertura_sao_motivos_distintos():
+    """Uma sessao pode ter as duas, e elas nao se confundem."""
+    cur = cursor_de_sessao(tres(), {"7": [20]}, status=[("7", "Classified")])
+    s = assess_session(cur, 855,
+                       source_rows=[{"NUMBER": "7", "STATUS": "Not classified"},
+                                    {"NUMBER": "99", "STATUS": "DNF"}])
+    assert STATUS_DIVERGES_FROM_SOURCE in s.reasons
+    assert SOURCE_COVERAGE_INCOMPLETE in s.reasons
+
+
+# ── O relatorio local ─────────────────────────────────────────
+
+def test_o_relatorio_e_escrito_onde_se_pede(tmp_path):
+    cur = cursor_de_sessao(tres(), {"7": [20]}, status=[("7", "Classified")])
+    s = assess_session(cur, 855, source_rows=[{"NUMBER": "7", "STATUS": "Classified"}])
+    destino = tmp_path / "855.json"
+    assert write_report(s, destino) == 0
+    assert '"session_id": 855' in destino.read_text(encoding="utf-8")
+
+
+def test_sem_destino_nada_e_escrito(tmp_path):
+    cur = cursor_de_sessao(tres(), {"7": [20]}, status=[("7", "Classified")])
+    s = assess_session(cur, 855, source_rows=[])
+    assert write_report(s, None) == 0
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_um_destino_impossivel_nao_derruba_a_execucao(tmp_path, capsys):
+    """
+    A unica escrita do modulo, e o unico preco que ela pode cobrar.
+
+    Quando o relatorio falha, a conexao ja foi fechada: o banco fica como
+    estava, e isso e dito em voz alta.
+    """
+    cur = cursor_de_sessao(tres(), {"7": [20]}, status=[("7", "Classified")])
+    s = assess_session(cur, 855, source_rows=[])
+    impossivel = tmp_path / "nao" / "existe" / "855.json"
+    assert write_report(s, impossivel) == 1
+    texto = capsys.readouterr().out
+    assert "nao pode ser escrito" in texto
+    assert "banco nao foi tocado" in texto
