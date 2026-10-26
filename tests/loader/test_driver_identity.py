@@ -12,6 +12,7 @@ normalised names, 1.079 names held by more than one row.
 from __future__ import annotations
 
 import sys
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -196,3 +197,70 @@ def test_ausencia_ambiguidade_e_falta_de_nome_sao_tres_fatos():
         assert o.resolved is False
     assert len({DriverOutcome.NOT_FOUND, DriverOutcome.MULTIPLE_CANDIDATES,
                 DriverOutcome.NO_NAME}) == 3
+
+
+# ── Composicao Unicode ────────────────────────────────────────
+
+def test_a_chave_nao_depende_da_composicao_do_texto():
+    """
+    `full_name_key` dobra por `comparable`, que agora poe o texto em NFC
+    antes de filtrar. Sem isso, a forma decomposta perdia os acentos no
+    `isalnum()` e o mesmo nome rendia duas chaves.
+    """
+    composto = unicodedata.normalize("NFC", "Jérôme")
+    decomposto = unicodedata.normalize("NFD", "Jérôme")
+    assert composto != decomposto
+    assert full_name_key(composto, "De Sadeleer") == \
+           full_name_key(decomposto, "De Sadeleer")
+
+
+def test_o_acento_continua_distinguindo_nomes():
+    """A correcao e de equivalencia canonica, nao de remocao de acento."""
+    assert full_name_key("Jérôme", "De Sadeleer") != \
+           full_name_key("Jerome", "De Sadeleer")
+
+
+@pytest.mark.parametrize("primeiro,ultimo", [
+    ("Antonio Felix", "Da Costa"),
+    ("Antonio FELIX DA", "COSTA"),
+    ("Antonio", "Felix Da Costa"),
+])
+def test_segmentacao_diferente_com_as_duas_composicoes(primeiro, ultimo):
+    """
+    O corte entre os campos e artefato do parser, e a composicao e artefato
+    da codificacao. Nenhum dos dois pode criar um segundo piloto.
+    """
+    def nfd(s):
+        return unicodedata.normalize("NFD", s)
+    esperado = full_name_key("António Felix", "Da Costa")
+    acentuado_primeiro = primeiro.replace("Antonio", "António")
+    assert full_name_key(acentuado_primeiro, ultimo) == esperado
+    assert full_name_key(nfd(acentuado_primeiro), nfd(ultimo)) == esperado
+
+
+def test_marca_combinante_na_emenda_entre_os_campos():
+    """
+    `full_name_key` concatena antes de dobrar, entao uma marca combinante
+    no inicio do sobrenome recai sobre a ultima letra do nome. NFC dentro de
+    `comparable` acontece depois da concatenacao, e por isso compoe a seam
+    em vez de descartar a marca.
+    """
+    # 'Jose' + combining acute => 'José'
+    na_emenda = full_name_key("Jose", "́ Lopez")
+    assert na_emenda == full_name_key("José", "Lopez")
+    assert na_emenda != full_name_key("Jose", "Lopez")
+
+
+def test_a_chave_e_idempotente_sob_renormalizacao():
+    for primeiro, ultimo in (("Jérôme", "De Sadeleer"),
+                             ("Marco", "Sørensen"),
+                             ("Salih", "Yoluç")):
+        chave = full_name_key(primeiro, ultimo)
+        assert full_name_key(chave, "") == chave
+        assert unicodedata.normalize("NFC", chave) == chave
+
+
+def test_as_letras_que_devem_continuar_distintas():
+    assert full_name_key("Marco", "Sørensen") != full_name_key("Marco", "Sorensen")
+    assert full_name_key("Salih", "Yoluç") != full_name_key("Salih", "Yoluc")
+    assert full_name_key("Sven", "Müller") != full_name_key("Sven", "Muller")

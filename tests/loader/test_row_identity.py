@@ -11,6 +11,7 @@ to the first row a query happened to return.
 from __future__ import annotations
 
 import sys
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -460,3 +461,97 @@ def test_nao_ha_limit_1_sem_order_by_na_resolucao():
     for sql in (row_identity._SESSION_CANDIDATES, row_identity._CAR_CANDIDATES):
         assert "LIMIT" not in sql.upper()
         assert "ORDER BY" in sql.upper()
+
+
+# ── Composicao Unicode ────────────────────────────────────────
+#
+# `comparable` filtra por `isalnum()`, e uma marca combinante e categoria
+# `Mn`, que nao e alnum. Sem normalizar antes, a funcao devolvia a forma
+# composta com acento e a decomposta sem — o mesmo nome, duas chaves,
+# decididas pela codificacao do arquivo de origem e nao pelo nome.
+
+NFC = unicodedata.normalize("NFC", "Jérôme")
+NFD = unicodedata.normalize("NFD", "Jérôme")
+
+
+def test_jerome_composto_e_decomposto_dao_a_mesma_chave():
+    """O caso que motivou a mudanca: 6 code points contra 8, um nome so."""
+    assert len(NFC) == 6 and len(NFD) == 8
+    assert NFC != NFD                      # as cadeias sao diferentes
+    assert comparable(NFC) == comparable(NFD)
+    assert comparable(NFC) == "jérôme"
+
+
+def test_a_forma_composta_continua_guardando_o_acento():
+    """A correcao e de equivalencia, nao de remocao: o acento sobrevive."""
+    assert comparable(NFC) != comparable("Jerome")
+
+
+@pytest.mark.parametrize("texto", [
+    "Jérôme", "Marco Sørensen", "Salih Yoluç",
+    "Sven Müller", "Petru Umbrărescu", "Miguel Cristóvão",
+    "José María López", "Nathanaël Berthon",
+])
+def test_toda_forma_canonicamente_equivalente_produz_a_mesma_chave(texto):
+    formas = [unicodedata.normalize(f, texto) for f in ("NFC", "NFD")]
+    chaves = {comparable(f) for f in formas}
+    assert len(chaves) == 1, f"{texto}: {chaves}"
+
+
+def test_o_que_a_mudanca_NAO_faz():
+    """
+    Nenhuma letra passa a equivaler a outra. Estes sao os casos que o
+    briefing desta mudanca exige manter distintos, e cada um tem linha na
+    tabela `drivers`.
+    """
+    # `ø` nao tem decomposicao: e letra atomica e sobrevive a NFC e a NFD.
+    assert comparable("Sørensen") != comparable("Sorensen")
+    assert comparable("Sørensen") == "sørensen"
+    # `ç` e `c` sao letras distintas do alfabeto turco.
+    assert comparable("Yoluç") != comparable("Yoluc")
+    # `ü` e `u` idem; a transliteracao alema seria `ue`, que tambem difere.
+    assert comparable("Müller") != comparable("Muller")
+    assert comparable("Müller") != comparable("Mueller")
+
+
+def test_o_comportamento_preexistente_de_casefold_fica_como_estava():
+    """
+    `casefold` ja fazia mais do que caixa, antes desta mudanca e depois
+    dela. Fixado aqui para que uma alteracao futura seja deliberada.
+    """
+    # ß dobra para duas letras.
+    assert comparable("Straße") == "strasse"
+    assert comparable("Straße") == comparable("STRASSE")
+    # `İ` dobra para `i` mais um ponto combinante, que o filtro descarta.
+    assert comparable("İzmir") == "izmir"
+    assert comparable("İzmir") == comparable("Izmir")
+
+
+def test_a_normalizacao_e_idempotente():
+    for texto in ("Jérôme", unicodedata.normalize("NFD", "Jérôme"),
+                  "Straße", "Sørensen", "360° Racing"):
+        uma = comparable(texto)
+        assert comparable(uma) == uma
+
+
+def test_nfkc_nao_foi_introduzido():
+    """
+    NFKC uniria formas de compatibilidade que nao sao a mesma letra. Nenhuma
+    destas existe no acervo, e a mudanca nao as aceita.
+    """
+    assert comparable("Ｊｏｅ") != comparable("Joe")   # largura dupla
+    assert comparable("Ⅳ") != comparable("IV")                # numeral romano
+
+
+def test_a_ligadura_fi_ja_era_dobrada_pelo_casefold():
+    """
+    Medido ao escrever estes testes, e **anterior** a esta mudanca:
+    `'ﬁ'.casefold()` devolve `'fi'`, de modo que a ligadura ja colidia
+    com as duas letras. NFC nao decompoe ligadura — `normalize('NFC', 'fi-
+    ligatura')` devolve a propria ligadura — entao quem dobra e o casefold.
+
+    Fixado para que o comportamento seja visto, nao descoberto de novo.
+    """
+    assert unicodedata.normalize("NFC", "ﬁ") == "ﬁ"
+    assert "ﬁ".casefold() == "fi"
+    assert comparable("ﬁn") == comparable("fin")
