@@ -80,6 +80,27 @@ lacunas.
 
 ---
 
+### 2.1 A evidência é completa; o limite só exibe
+
+`pair_evidence` lista os pares não exatos, e por padrão corta em 20. O corte
+é **de exibição e nada mais**:
+
+```
+divergencias: 90   exibidas: 20   truncado: True
+como_ver_o_resto: "--evidence-limit 0 lista todas; a contagem e a
+                   classificacao nao dependem deste limite"
+```
+
+`MEASURED`: com `--evidence-limit 0` sobre as 225 entradas, as **2.363**
+divergências aparecem inteiras (1.960 + 403), e **37 entradas** deixam de
+ser truncadas. As contagens por categoria e os vereditos são **idênticos**
+com e sem limite — um teste parametrizado em 0, 1, 5, 20 e 100 fixa isso.
+
+`DERIVED`: nada é escondido e nada é exportado automaticamente. Para ver o
+resto basta repetir a leitura com outro limite.
+
+---
+
 ## 3. Os portadores como registros inteiros
 
 **Voltas iguais não tornam dois `cars` intercambiáveis.** Para cada portador
@@ -100,6 +121,43 @@ o módulo lê os atributos de `cars`, a linha de `results`, os vínculos de
 erro** nelas, e não existe chave estrangeira para redirecionar. Por isso a
 presença de linha analítica em qualquer portador é registrada como
 impedimento `ANALYTICS_REFERENCES_WITHOUT_FK`.
+
+### 3.1 Os `results` de cada portador, comparados à parte
+
+Cada portador tem a sua linha em `results`, e essa linha **não são as
+voltas**: um portador cujas voltas batem com as do outro ainda pode guardar
+posição, status ou proveniência diferentes.
+
+As colunas vêm do catálogo, pelo mesmo motivo das de `laps`. Quatro ficam de
+fora:
+
+| coluna | por que não é comparada |
+|---|---|
+| `id` | chave substituta, diferente por construção |
+| `session_id` | chave de junção, igual nos dois por seleção |
+| `car_id` | **é o portador**, não atributo do resultado |
+| `created_at` | escrituração da ingestão, não fato sobre o resultado |
+
+`MEASURED`, as 14 comparadas: `position`, `status`, `laps_completed`,
+`total_time_raw`, `total_time_s`, `gap_to_first_raw`, `gap_to_first_s`,
+`gap_to_prev_raw`, `gap_to_prev_s`, `fl_lap_number`, `fl_time_raw`,
+`fl_time_s`, `fl_kph` e **`source_url`** — a proveniência entra, porque uma
+diferença ali seria material.
+
+Dois achados, separados:
+
+| | o que é | impedimento |
+|---|---|---|
+| **diferença material** | os dois lados afirmam, e afirmam coisas diferentes | `RESULT_MATERIAL_DIFFERENCE` |
+| **informação exclusiva** | um lado guarda valor que o outro deixa NULL | `RESULT_EXCLUSIVE_INFORMATION` |
+
+Qualquer um dos dois **impede `CANDIDATE`**: o primeiro porque só um pode
+descrever a inscrição e o módulo não escolhe; o segundo porque descartar
+aquele portador perderia o valor.
+
+`DERIVED`: isto **não se mistura** com a equivalência das voltas. Voltas
+iguais e `results` divergentes é combinação possível, e o relatório diz as
+duas coisas separadamente.
 
 ---
 
@@ -182,7 +240,8 @@ Equivalência: **135** `EXACT_EQUIVALENCE` e **90**
 a investigação não aplicava: **avaliar os portadores como registros
 inteiros**.
 
-`MEASURED`, impedimentos por entrada:
+`MEASURED`, impedimentos por entrada (reexecutado com a comparação de
+`results` em vigor):
 
 ```
  110  EXCLUSIVE_METADATA_ON_A_CARRIER
@@ -207,6 +266,18 @@ investigação aplicava — fonte local ausente e identidade partida em
 `results` — que aqui viram impedimento **por entrada**.
 
 `DERIVED`: a avaliação nova é **mais estrita**, e deliberadamente.
+
+### 6.2.1 A comparação de `results` não encontrou nada
+
+`MEASURED`, nas 225 entradas: **0** com diferença material em `results` e
+**0** com informação exclusiva. As 14 colunas comparadas concordam nos dois
+portadores em todas elas, `source_url` incluído.
+
+`DERIVED`: os vereditos **não mudaram** por causa deste acréscimo —
+continuam 1 / 224 por entrada e 1 / 91 por sessão. É uma afirmação
+verificada, não uma verificação ausente: a PR #57 já havia medido que todas
+as colunas de `results` concordam entre as três levas, e a comparação por
+portador confirma pelo outro lado.
 
 ### 6.3 A matriz da PR #57 não muda
 
@@ -282,6 +353,10 @@ classificação nenhuma** — em particular, nunca `CANDIDATE`.
 # uma inscricao
 python -m database.recovery.carriers --session-id 855 --number 009 \
   --password "$DB_PASSWORD"
+
+# a mesma, com todas as divergencias listadas em vez das 20 primeiras
+python -m database.recovery.carriers --session-id 855 --number 009 \
+  --evidence-limit 0 --password "$DB_PASSWORD"
 
 # uma sessao inteira
 python -m database.recovery.carriers --session-id 855 --password "$DB_PASSWORD"

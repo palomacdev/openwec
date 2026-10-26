@@ -101,6 +101,8 @@ SEVERITY = {CANDIDATE: 0, REQUIRES_SPECIAL_HANDLING: 1, BLOCKED: 2}
 IMPEDIMENT_DRIVER_IDENTITY = "DRIVER_IDENTITY_UNRESOLVED"
 IMPEDIMENT_EXCLUSIVE_METADATA = "EXCLUSIVE_METADATA_ON_A_CARRIER"
 IMPEDIMENT_RESULT_DRIVERS_DIFFER = "RESULT_DRIVERS_DIFFER"
+IMPEDIMENT_RESULT_MATERIAL_DIFFERENCE = "RESULT_MATERIAL_DIFFERENCE"
+IMPEDIMENT_RESULT_EXCLUSIVE_INFORMATION = "RESULT_EXCLUSIVE_INFORMATION"
 IMPEDIMENT_ANALYTICS_WITHOUT_FK = "ANALYTICS_REFERENCES_WITHOUT_FK"
 IMPEDIMENT_ANALYTICS_ASYMMETRIC = "ANALYTICS_PRESENT_ON_ONE_CARRIER_ONLY"
 
@@ -153,6 +155,66 @@ def lap_columns(cur) -> LapColumns:
 
 class CarrierAssessmentError(Exception):
     """A read failed. Nothing is written, and nothing is called equivalent."""
+
+
+# Each carrier has its own row in `results`, and those rows are not the
+# laps: a carrier whose laps match the other's may still hold a different
+# position, status or provenance. Discovered from the catalogue for the same
+# reason the lap columns are — a column added later must join the comparison
+# rather than be skipped.
+RESULT_EXCLUDED_COLUMNS = {
+    "id": "surrogate key, different by construction for any two rows",
+    "session_id": "the join key; equal for both carriers by selection",
+    "car_id": "the carrier itself, not an attribute of the result",
+    "created_at": "bookkeeping of the ingestion, not a fact about the result",
+}
+
+
+def result_columns(cur) -> tuple[str, ...]:
+    """The `results` columns that take part in the comparison."""
+    cur.execute("""
+        SELECT column_name FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = 'results'
+         ORDER BY ordinal_position
+    """)
+    todas = [linha[0] for linha in cur.fetchall()]
+    if not todas:
+        raise CarrierAssessmentError("a tabela results nao foi encontrada")
+    return tuple(c for c in todas if c not in RESULT_EXCLUDED_COLUMNS)
+
+
+def compare_results(a: dict, b: dict, colunas: tuple[str, ...]) -> dict:
+    """
+    The two `results` rows, with contradiction told apart from silence.
+
+    A **material difference** is both sides stating something and stating
+    different things — a position, a status, a lap count, a source URL. Only
+    one of the two can describe the entry, and this module has no basis for
+    choosing.
+
+    **Exclusive information** is one side holding a value the other leaves
+    NULL. Nothing contradicts, but discarding that carrier would lose it,
+    which is a potential loss and not an equivalence.
+
+    Neither is mixed with the lap comparison. Equal laps and differing
+    results are a perfectly possible combination, and the report says so.
+    """
+    materiais: dict = {}
+    exclusivos: dict = {}
+    for coluna in colunas:
+        va, vb = a.get(coluna), b.get(coluna)
+        if va is None and vb is None:
+            continue
+        if va is not None and vb is not None:
+            if va != vb:
+                materiais[coluna] = {"a": str(va), "b": str(vb)}
+        else:
+            exclusivos[coluna] = {
+                "valor": str(va if va is not None else vb),
+                "somente_em": "a" if va is not None else "b"}
+    return {"materiais": materiais, "exclusivos": exclusivos,
+            "colunas_comparadas": list(colunas),
+            "colunas_excluidas": dict(RESULT_EXCLUDED_COLUMNS)}
 
 
 # ── Reading ──────────────────────────────────────────────────
@@ -381,6 +443,7 @@ class CarrierProfile:
     car: dict = dataclass_field(default_factory=dict)
     created_at: str | None = None
     result_id: int | None = None
+    result: dict = dataclass_field(default_factory=dict)
     result_drivers: list = dataclass_field(default_factory=list)
     laps: int = 0
     analytics_car_session: int = 0
@@ -390,7 +453,8 @@ class CarrierProfile:
         return dict(self.__dict__)
 
 
-def carrier_profile(cur, session_id: int, car_id: int) -> CarrierProfile:
+def carrier_profile(cur, session_id: int, car_id: int,
+                    colunas_de_result: tuple[str, ...] = ()) -> CarrierProfile:
     """
     Everything that hangs off this carrier, not only its laps.
 
@@ -399,8 +463,9 @@ def carrier_profile(cur, session_id: int, car_id: int) -> CarrierProfile:
     each, are what a consolidation would have to answer for.
     """
     campos = ", ".join(f"c.{c}" for c in CAR_ATTRIBUTES)
+    de_result = "".join(f", r.{c}::text" for c in colunas_de_result)
     cur.execute(f"""
-        SELECT {campos}, c.created_at::text, r.id
+        SELECT {campos}, c.created_at::text, r.id{de_result}
           FROM cars c LEFT JOIN results r
             ON r.car_id = c.id AND r.session_id = %s
          WHERE c.id = %s
@@ -409,10 +474,12 @@ def carrier_profile(cur, session_id: int, car_id: int) -> CarrierProfile:
     if not linha:
         raise CarrierAssessmentError(f"o carro {car_id} nao existe")
 
+    corte = len(CAR_ATTRIBUTES)
     p = CarrierProfile(car_id=car_id,
-                       car=dict(zip(CAR_ATTRIBUTES, linha[:len(CAR_ATTRIBUTES)])),
-                       created_at=linha[len(CAR_ATTRIBUTES)],
-                       result_id=linha[len(CAR_ATTRIBUTES) + 1])
+                       car=dict(zip(CAR_ATTRIBUTES, linha[:corte])),
+                       created_at=linha[corte],
+                       result_id=linha[corte + 1],
+                       result=dict(zip(colunas_de_result, linha[corte + 2:])))
 
     cur.execute("""
         SELECT rd.slot, d.id, d.first_name, d.last_name
@@ -493,6 +560,7 @@ class EntryAssessment:
     coverage: dict = dataclass_field(default_factory=dict)
     pair_counts: dict = dataclass_field(default_factory=dict)
     pair_evidence: list = dataclass_field(default_factory=list)
+    pair_evidence_meta: dict = dataclass_field(default_factory=dict)
     carriers: list = dataclass_field(default_factory=list)
     equivalence: str = UNDETERMINED_EQUIVALENCE
     verdict: str = BLOCKED
@@ -541,9 +609,21 @@ def verdict_of(equivalencia: str, impedimentos: list[str]) -> str:
     return CANDIDATE
 
 
+DEFAULT_EVIDENCE_LIMIT = 20
+
+
 def assess_entry(cur, session_id: int, number: str,
-                 colunas: LapColumns | None = None) -> EntryAssessment:
-    """One entry of the triplication class, read and reported."""
+                 colunas: LapColumns | None = None,
+                 colunas_de_result: tuple[str, ...] | None = None,
+                 evidence_limit: int = DEFAULT_EVIDENCE_LIMIT) -> EntryAssessment:
+    """
+    One entry of the triplication class, read and reported.
+
+    `evidence_limit` caps how many diverging pairs are listed, never how
+    many are counted or how the entry is classified. Zero lists every one of
+    them, and the report always says how many there were and whether the
+    list was cut.
+    """
     e = EntryAssessment(session_id=session_id, number=number)
 
     pop = population(cur, session_id, number)
@@ -556,9 +636,15 @@ def assess_entry(cur, session_id: int, number: str,
         return e
 
     colunas = colunas or lap_columns(cur)
-    e.columns_compared = {"esportivas": list(colunas.sporting),
-                          "identidade": colunas.driver,
-                          "excluidas": colunas.excluded}
+    colunas_de_result = (result_columns(cur) if colunas_de_result is None
+                         else colunas_de_result)
+    e.columns_compared = {
+        "laps": {"esportivas": list(colunas.sporting),
+                 "identidade": colunas.driver,
+                 "excluidas": colunas.excluded},
+        "results": {"comparadas": list(colunas_de_result),
+                    "excluidas": dict(RESULT_EXCLUDED_COLUMNS)},
+    }
 
     a_id, b_id = pop.carriers
     pares, cobertura = compare_carriers(
@@ -570,11 +656,20 @@ def assess_entry(cur, session_id: int, number: str,
     e.pair_counts = {c: sum(1 for p in pares if p.category == c)
                      for c in PAIR_CATEGORIES}
     e.pair_counts["total"] = len(pares)
-    e.pair_evidence = [p.as_dict() for p in pares
-                       if p.category != EXACT_DUPLICATE][:20]
+    divergentes = [p.as_dict() for p in pares if p.category != EXACT_DUPLICATE]
+    mostrados = divergentes if evidence_limit <= 0 else divergentes[:evidence_limit]
+    e.pair_evidence = mostrados
+    e.pair_evidence_meta = {
+        "divergencias": len(divergentes),
+        "exibidas": len(mostrados),
+        "truncado": len(mostrados) < len(divergentes),
+        "limite": evidence_limit,
+        "como_ver_o_resto": ("--evidence-limit 0 lista todas; a contagem e a "
+                             "classificacao nao dependem deste limite"),
+    }
 
-    perfis = [carrier_profile(cur, session_id, a_id),
-              carrier_profile(cur, session_id, b_id)]
+    perfis = [carrier_profile(cur, session_id, a_id, colunas_de_result),
+              carrier_profile(cur, session_id, b_id, colunas_de_result)]
     e.carriers = [p.as_dict() for p in perfis]
 
     e.equivalence = equivalence_of(e.pair_counts)
@@ -589,6 +684,16 @@ def assess_entry(cur, session_id: int, number: str,
     if {(d["driver_id"], d["slot"]) for d in perfis[0].result_drivers} != \
        {(d["driver_id"], d["slot"]) for d in perfis[1].result_drivers}:
         impedimentos.append(IMPEDIMENT_RESULT_DRIVERS_DIFFER)
+
+    # Os `results` dos dois portadores, comparados a parte das voltas.
+    comparacao = compare_results(perfis[0].result, perfis[1].result,
+                                 colunas_de_result)
+    e.notes["comparacao_de_results"] = comparacao
+    if comparacao["materiais"]:
+        impedimentos.append(IMPEDIMENT_RESULT_MATERIAL_DIFFERENCE)
+    if comparacao["exclusivos"]:
+        impedimentos.append(IMPEDIMENT_RESULT_EXCLUSIVE_INFORMATION)
+
     if perfis[0].analytics_car_session or perfis[1].analytics_car_session:
         impedimentos.append(IMPEDIMENT_ANALYTICS_WITHOUT_FK)
         if bool(perfis[0].analytics_car_session) != bool(perfis[1].analytics_car_session):
@@ -630,7 +735,7 @@ def class_entries(cur) -> list[tuple[int, str]]:
     return [(s, n) for s, n in cur.fetchall()]
 
 
-def assess_class(cur) -> dict:
+def assess_class(cur, evidence_limit: int = DEFAULT_EVIDENCE_LIMIT) -> dict:
     """
     The whole population, for the reconciliation.
 
@@ -638,7 +743,9 @@ def assess_class(cur) -> dict:
     figure here is adjusted to agree with an earlier investigation.
     """
     colunas = lap_columns(cur)
-    entradas = [assess_entry(cur, s, n, colunas) for s, n in class_entries(cur)]
+    de_result = result_columns(cur)
+    entradas = [assess_entry(cur, s, n, colunas, de_result, evidence_limit)
+                for s, n in class_entries(cur)]
 
     pares = {c: sum(e.pair_counts.get(c, 0) for e in entradas)
              for c in PAIR_CATEGORIES}
@@ -668,6 +775,14 @@ def assess_class(cur) -> dict:
         "entradas": len(entradas),
         "sessoes": len({e.session_id for e in entradas}),
         "pares": pares,
+        "evidencia": {
+            "divergencias": sum(e.pair_evidence_meta["divergencias"]
+                                for e in entradas),
+            "exibidas": sum(e.pair_evidence_meta["exibidas"] for e in entradas),
+            "entradas_truncadas": sum(1 for e in entradas
+                                      if e.pair_evidence_meta["truncado"]),
+            "limite": evidence_limit,
+        },
         "vereditos_por_entrada": vereditos,
         "vereditos_por_sessao": por_sessao,
         "sessoes_tocadas_por_veredito": {k: len(v) for k, v in sessoes.items()},
@@ -677,7 +792,8 @@ def assess_class(cur) -> dict:
     }
 
 
-def assess_session_carriers(cur, session_id: int) -> dict:
+def assess_session_carriers(cur, session_id: int,
+                            evidence_limit: int = DEFAULT_EVIDENCE_LIMIT) -> dict:
     """Every multi-carrier entry of one session."""
     cur.execute("""
         SELECT c.number
@@ -693,7 +809,9 @@ def assess_session_carriers(cur, session_id: int) -> dict:
     numeros = [linha[0] for linha in cur.fetchall()]
 
     colunas = lap_columns(cur) if numeros else None
-    entradas = [assess_entry(cur, session_id, n, colunas) for n in numeros]
+    de_result = result_columns(cur) if numeros else None
+    entradas = [assess_entry(cur, session_id, n, colunas, de_result,
+                             evidence_limit) for n in numeros]
     veredito = max((e.verdict for e in entradas), key=lambda v: SEVERITY[v],
                    default=CANDIDATE)
     return {"session_id": session_id,
@@ -742,6 +860,9 @@ def main() -> int:
     ap.add_argument("--dbname", default="openwec")
     ap.add_argument("--user", default="openwec")
     ap.add_argument("--password", default="")
+    ap.add_argument("--evidence-limit", type=int, default=DEFAULT_EVIDENCE_LIMIT,
+                    help="how many diverging pairs to list; 0 lists every one. "
+                         "It never changes a count or a classification")
     ap.add_argument("--json", type=Path,
                     help="write the report here; a scratch path outside the "
                          "repository and outside raw/ is the recommendation")
@@ -753,15 +874,17 @@ def main() -> int:
     try:
         with conn.cursor() as cur:
             if args.whole_class:
-                dados = assess_class(cur)
+                dados = assess_class(cur, args.evidence_limit)
                 entradas = []
             elif args.session_id is None:
                 ap.error("informe --session-id ou --whole-class")
             elif args.number:
-                dados = assess_entry(cur, args.session_id, args.number).as_dict()
+                dados = assess_entry(cur, args.session_id, args.number,
+                                     evidence_limit=args.evidence_limit).as_dict()
                 entradas = [dados]
             else:
-                dados = assess_session_carriers(cur, args.session_id)
+                dados = assess_session_carriers(cur, args.session_id,
+                                                args.evidence_limit)
                 entradas = dados["entries"]
     except CarrierAssessmentError as exc:
         conn.rollback()
@@ -788,6 +911,17 @@ def main() -> int:
         if e["pair_counts"]:
             print("  pares: " + "  ".join(
                 f"{k}={v}" for k, v in e["pair_counts"].items() if v))
+        meta = e.get("pair_evidence_meta") or {}
+        if meta.get("divergencias"):
+            print(f"  divergencias: {meta['divergencias']}  "
+                  f"exibidas: {meta['exibidas']}  "
+                  f"truncado: {meta['truncado']}")
+        comparacao = (e.get("notes") or {}).get("comparacao_de_results") or {}
+        if comparacao.get("materiais"):
+            print(f"  results divergem em: {sorted(comparacao['materiais'])}")
+        if comparacao.get("exclusivos"):
+            print(f"  results com informacao exclusiva: "
+                  f"{sorted(comparacao['exclusivos'])}")
         if e["impediments"]:
             print("  impedimentos: " + ", ".join(e["impediments"]))
         print(f"  candidate_car_ids: {e['candidate_car_ids']}  "

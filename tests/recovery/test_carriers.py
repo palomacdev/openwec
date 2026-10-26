@@ -32,6 +32,8 @@ from database.recovery.carriers import (  # noqa: E402
     IMPEDIMENT_DRIVER_IDENTITY,
     IMPEDIMENT_EXCLUSIVE_METADATA,
     IMPEDIMENT_RESULT_DRIVERS_DIFFER,
+    IMPEDIMENT_RESULT_EXCLUSIVE_INFORMATION,
+    IMPEDIMENT_RESULT_MATERIAL_DIFFERENCE,
     NON_EQUIVALENT,
     OUTSIDE_ASSESSMENT_CLASS,
     REQUIRES_SPECIAL_HANDLING,
@@ -40,6 +42,7 @@ from database.recovery.carriers import (  # noqa: E402
     UNDETERMINED,
     UNDETERMINED_EQUIVALENCE,
     UNMATCHED_LAP,
+    RESULT_EXCLUDED_COLUMNS,
     CarrierAssessmentError,
     LapColumns,
     assess_entry,
@@ -47,8 +50,10 @@ from database.recovery.carriers import (  # noqa: E402
     compare_lap,
     equivalence_of,
     exclusive_metadata,
+    compare_results,
     index_by_lap_number,
     lap_columns,
+    result_columns,
     population,
     verdict_of,
     write_report,
@@ -247,7 +252,7 @@ def test_a_populacao_valida_tem_tres_linhas_e_dois_portadores():
 
 def test_fora_da_populacao_o_veredito_e_bloqueado_sem_criterio_aplicado():
     cur = pop_cursor({10: 5, 20: 5, 30: 5})
-    e = assess_entry(cur, 855, "7", COLUNAS)
+    e = assess_entry(cur, 855, "7", COLUNAS, RESULT_COLS)
     assert e.verdict == BLOCKED
     assert e.impediments == [OUTSIDE_ASSESSMENT_CLASS]
     assert e.equivalence == UNDETERMINED_EQUIVALENCE
@@ -312,16 +317,26 @@ def test_metadado_igual_nao_e_exclusivo():
 
 # ── The whole entry, through the cursor ──────────────────────
 
+RESULT_COLS = ("position", "status", "laps_completed", "total_time_s",
+               "source_url")
+RESULTADO = {"position": 4, "status": "Classified", "laps_completed": 151,
+             "total_time_s": "21683.051", "source_url": "https://exemplo/h6"}
+
+
 def entrada_cursor(carriers, laps_a, laps_b, *,
                    car_a=None, car_b=None, rd_a=(), rd_b=(),
-                   counts_a=(0, 0, 0), counts_b=(0, 0, 0)):
+                   counts_a=(0, 0, 0), counts_b=(0, 0, 0),
+                   result_a=None, result_b=None):
     """The queue `assess_entry` consumes, in the order it asks."""
-    def car_row(car):
+    def car_row(car, resultado):
         atributos = dict.fromkeys(CAR_ATTRIBUTES)
         atributos.update({"number": "007", "team_id": 1})
         atributos.update(car or {})
+        r = dict(RESULTADO)
+        r.update(resultado or {})
         return [tuple(atributos[c] for c in CAR_ATTRIBUTES)
-                + ("2026-05-22T10:47:26+00:00", 900)]
+                + ("2026-05-22T10:47:26+00:00", 900)
+                + tuple(r[c] for c in RESULT_COLS)]
 
     def linhas(ls):
         return [tuple(l[c] for c in COLUNAS.all_read) for l in ls]
@@ -330,15 +345,15 @@ def entrada_cursor(carriers, laps_a, laps_b, *,
         [(c, n) for c, n in carriers.items()],      # lap_carriers
         linhas(laps_a),                             # carrier_lap_rows a
         linhas(laps_b),                             # carrier_lap_rows b
-        car_row(car_a), list(rd_a), [counts_a],     # carrier_profile a
-        car_row(car_b), list(rd_b), [counts_b],     # carrier_profile b
+        car_row(car_a, result_a), list(rd_a), [counts_a],   # carrier_profile a
+        car_row(car_b, result_b), list(rd_b), [counts_b],   # carrier_profile b
     ])
 
 
 def test_entrada_integralmente_duplicada_e_candidata():
     cur = entrada_cursor({10: 2, 20: 2, 30: 0},
                          [volta(1), volta(2)], [volta(1), volta(2)])
-    e = assess_entry(cur, 855, "007", COLUNAS)
+    e = assess_entry(cur, 855, "007", COLUNAS, RESULT_COLS)
     assert e.equivalence == EXACT_EQUIVALENCE
     assert e.verdict == CANDIDATE
     assert e.impediments == []
@@ -353,7 +368,7 @@ def test_os_dois_portadores_voltam_sempre_em_candidate_car_ids():
     of correctness, and returning a single id would read as a decision.
     """
     cur = entrada_cursor({10: 1, 20: 1, 30: 0}, [volta(1)], [volta(1)])
-    e = assess_entry(cur, 855, "007", COLUNAS)
+    e = assess_entry(cur, 855, "007", COLUNAS, RESULT_COLS)
     assert e.candidate_car_ids == [10, 20]
     assert not hasattr(e, "canonical_car_id")
 
@@ -362,7 +377,7 @@ def test_11_result_drivers_divergentes_viram_impedimento():
     cur = entrada_cursor({10: 1, 20: 1, 30: 0}, [volta(1)], [volta(1)],
                          rd_a=[(1, 43, "Marco", "Sørensen")],
                          rd_b=[(1, 330979, "Marco", "SØRENSEN")])
-    e = assess_entry(cur, 855, "009", COLUNAS)
+    e = assess_entry(cur, 855, "009", COLUNAS, RESULT_COLS)
     assert IMPEDIMENT_RESULT_DRIVERS_DIFFER in e.impediments
     assert e.verdict == REQUIRES_SPECIAL_HANDLING
     assert e.equivalence == EXACT_EQUIVALENCE   # as voltas seguem equivalentes
@@ -371,7 +386,7 @@ def test_11_result_drivers_divergentes_viram_impedimento():
 def test_12_analiticas_nos_dois_portadores():
     cur = entrada_cursor({10: 1, 20: 1, 30: 0}, [volta(1)], [volta(1)],
                          counts_a=(1, 1, 7), counts_b=(1, 1, 7))
-    e = assess_entry(cur, 855, "007", COLUNAS)
+    e = assess_entry(cur, 855, "007", COLUNAS, RESULT_COLS)
     assert IMPEDIMENT_ANALYTICS_WITHOUT_FK in e.impediments
     assert IMPEDIMENT_ANALYTICS_ASYMMETRIC not in e.impediments
     assert e.verdict == REQUIRES_SPECIAL_HANDLING
@@ -380,14 +395,14 @@ def test_12_analiticas_nos_dois_portadores():
 def test_13_analiticas_em_apenas_um_portador():
     cur = entrada_cursor({10: 1, 20: 1, 30: 0}, [volta(1)], [volta(1)],
                          counts_a=(1, 1, 7), counts_b=(1, 0, 0))
-    e = assess_entry(cur, 855, "007", COLUNAS)
+    e = assess_entry(cur, 855, "007", COLUNAS, RESULT_COLS)
     assert IMPEDIMENT_ANALYTICS_ASYMMETRIC in e.impediments
 
 
 def test_metadado_exclusivo_chega_ao_relatorio_da_entrada():
     cur = entrada_cursor({10: 1, 20: 1, 30: 0}, [volta(1)], [volta(1)],
                          car_a={"tyre_supplier": "Michelin"})
-    e = assess_entry(cur, 855, "007", COLUNAS)
+    e = assess_entry(cur, 855, "007", COLUNAS, RESULT_COLS)
     assert IMPEDIMENT_EXCLUSIVE_METADATA in e.impediments
     assert e.notes["metadado_exclusivo"]["tyre_supplier"][
         "somente_no_car_id"] == 10
@@ -396,7 +411,7 @@ def test_metadado_exclusivo_chega_ao_relatorio_da_entrada():
 def test_o_conflito_esportivo_bloqueia_a_entrada():
     cur = entrada_cursor({10: 1, 20: 1, 30: 0}, [volta(1)],
                          [volta(1, lap_time_s=126.0)])
-    e = assess_entry(cur, 855, "007", COLUNAS)
+    e = assess_entry(cur, 855, "007", COLUNAS, RESULT_COLS)
     assert e.equivalence == NON_EQUIVALENT
     assert e.verdict == BLOCKED
 
@@ -413,12 +428,12 @@ def test_15_uma_leitura_que_falha_nao_produz_elegibilidade():
             raise CarrierAssessmentError("falha de leitura simulada")
 
     with pytest.raises(CarrierAssessmentError):
-        assess_entry(CursorQueQuebra(), 855, "007", COLUNAS)
+        assess_entry(CursorQueQuebra(), 855, "007", COLUNAS, RESULT_COLS)
 
 
 def test_nenhuma_consulta_do_modulo_escreve():
     cur = entrada_cursor({10: 1, 20: 1, 30: 0}, [volta(1)], [volta(1)])
-    assess_entry(cur, 855, "007", COLUNAS)
+    assess_entry(cur, 855, "007", COLUNAS, RESULT_COLS)
     for sql, _ in cur.executados:
         assert sql.upper().lstrip().startswith(("SELECT", "WITH")), sql
 
@@ -440,3 +455,170 @@ def test_um_destino_impossivel_nao_e_classificado_como_sucesso(tmp_path, capsys)
     assert write_report({"x": 1}, tmp_path / "nao" / "existe.json") == 1
     saida = capsys.readouterr().out
     assert "nao pode ser escrito" in saida and "banco nao foi tocado" in saida
+
+
+# ── Os `results` dos portadores, comparados a parte ───────────
+
+def test_as_colunas_de_results_vem_do_catalogo():
+    cur = CursorFalso([[("id",), ("session_id",), ("car_id",), ("position",),
+                        ("status",), ("source_url",), ("created_at",)]])
+    assert result_columns(cur) == ("position", "status", "source_url")
+
+
+def test_uma_coluna_nova_em_results_entra_na_comparacao():
+    cur = CursorFalso([[("id",), ("session_id",), ("car_id",), ("coluna_nova",)]])
+    assert "coluna_nova" in result_columns(cur)
+
+
+def test_sem_a_tabela_results_a_leitura_falha():
+    with pytest.raises(CarrierAssessmentError):
+        result_columns(CursorFalso([[]]))
+
+
+def test_toda_coluna_de_results_excluida_tem_motivo():
+    assert set(RESULT_EXCLUDED_COLUMNS) == {"id", "session_id", "car_id",
+                                            "created_at"}
+    assert all(isinstance(v, str) and v for v in RESULT_EXCLUDED_COLUMNS.values())
+
+
+def test_results_identicos_nao_produzem_achado():
+    c = compare_results(dict(RESULTADO), dict(RESULTADO), RESULT_COLS)
+    assert c["materiais"] == {} and c["exclusivos"] == {}
+
+
+def test_results_contraditorios_sao_diferenca_material():
+    """Os dois afirmam, e afirmam coisas diferentes: so um descreve a inscricao."""
+    b = dict(RESULTADO, position=5)
+    c = compare_results(dict(RESULTADO), b, RESULT_COLS)
+    assert c["materiais"] == {"position": {"a": "4", "b": "5"}}
+    assert c["exclusivos"] == {}
+
+
+def test_results_complementares_sao_informacao_exclusiva():
+    """Nada se contradiz, mas descartar aquele portador perderia o valor."""
+    b = dict(RESULTADO, source_url=None)
+    c = compare_results(dict(RESULTADO), b, RESULT_COLS)
+    assert c["materiais"] == {}
+    assert c["exclusivos"]["source_url"] == {"valor": "https://exemplo/h6",
+                                             "somente_em": "a"}
+
+
+def test_os_dois_nulos_nao_sao_exclusividade():
+    a = dict(RESULTADO, source_url=None)
+    b = dict(RESULTADO, source_url=None)
+    assert compare_results(a, b, RESULT_COLS)["exclusivos"] == {}
+
+
+def test_a_comparacao_de_results_registra_o_que_olhou():
+    c = compare_results(dict(RESULTADO), dict(RESULTADO), RESULT_COLS)
+    assert c["colunas_comparadas"] == list(RESULT_COLS)
+    assert set(c["colunas_excluidas"]) == set(RESULT_EXCLUDED_COLUMNS)
+
+
+def test_results_contraditorios_impedem_candidate():
+    cur = entrada_cursor({10: 1, 20: 1, 30: 0}, [volta(1)], [volta(1)],
+                         result_b={"position": 5})
+    e = assess_entry(cur, 855, "007", COLUNAS, RESULT_COLS)
+    assert IMPEDIMENT_RESULT_MATERIAL_DIFFERENCE in e.impediments
+    assert e.verdict == REQUIRES_SPECIAL_HANDLING
+    # As voltas seguem equivalentes: as duas coisas nao se misturam.
+    assert e.equivalence == EXACT_EQUIVALENCE
+    assert e.pair_counts[EXACT_DUPLICATE] == 1
+
+
+def test_informacao_exclusiva_em_results_impede_candidate():
+    cur = entrada_cursor({10: 1, 20: 1, 30: 0}, [volta(1)], [volta(1)],
+                         result_b={"source_url": None})
+    e = assess_entry(cur, 855, "007", COLUNAS, RESULT_COLS)
+    assert IMPEDIMENT_RESULT_EXCLUSIVE_INFORMATION in e.impediments
+    assert e.verdict == REQUIRES_SPECIAL_HANDLING
+    assert e.equivalence == EXACT_EQUIVALENCE
+
+
+def test_results_iguais_nao_impedem_nada():
+    cur = entrada_cursor({10: 1, 20: 1, 30: 0}, [volta(1)], [volta(1)])
+    e = assess_entry(cur, 855, "007", COLUNAS, RESULT_COLS)
+    assert IMPEDIMENT_RESULT_MATERIAL_DIFFERENCE not in e.impediments
+    assert IMPEDIMENT_RESULT_EXCLUSIVE_INFORMATION not in e.impediments
+    assert e.verdict == CANDIDATE
+
+
+def test_a_comparacao_de_results_entra_nas_notas():
+    cur = entrada_cursor({10: 1, 20: 1, 30: 0}, [volta(1)], [volta(1)],
+                         result_b={"laps_completed": 150})
+    e = assess_entry(cur, 855, "007", COLUNAS, RESULT_COLS)
+    assert e.notes["comparacao_de_results"]["materiais"]["laps_completed"] == {
+        "a": "151", "b": "150"}
+
+
+def test_as_colunas_comparadas_sao_relatadas_das_duas_tabelas():
+    cur = entrada_cursor({10: 1, 20: 1, 30: 0}, [volta(1)], [volta(1)])
+    e = assess_entry(cur, 855, "007", COLUNAS, RESULT_COLS)
+    assert e.columns_compared["laps"]["identidade"] == "driver_id"
+    assert e.columns_compared["results"]["comparadas"] == list(RESULT_COLS)
+    assert set(e.columns_compared["results"]["excluidas"]) == set(
+        RESULT_EXCLUDED_COLUMNS)
+
+
+# ── A evidencia e completa, e o limite so exibe ───────────────
+
+def muitas_divergencias(n: int = 25):
+    a = [volta(i, driver_id=43) for i in range(1, n + 1)]
+    b = [volta(i, driver_id=330979) for i in range(1, n + 1)]
+    return a, b
+
+
+def test_mais_de_vinte_divergencias_sao_contadas_todas():
+    a, b = muitas_divergencias(25)
+    cur = entrada_cursor({10: 25, 20: 25, 30: 0}, a, b)
+    e = assess_entry(cur, 855, "007", COLUNAS, RESULT_COLS)
+    assert e.pair_counts[DRIVER_ID_DIVERGENCE] == 25
+    assert e.pair_evidence_meta["divergencias"] == 25
+    assert e.pair_evidence_meta["exibidas"] == 20
+    assert e.pair_evidence_meta["truncado"] is True
+    assert len(e.pair_evidence) == 20
+
+
+def test_o_limite_zero_lista_todas():
+    a, b = muitas_divergencias(25)
+    cur = entrada_cursor({10: 25, 20: 25, 30: 0}, a, b)
+    e = assess_entry(cur, 855, "007", COLUNAS, RESULT_COLS, evidence_limit=0)
+    assert e.pair_evidence_meta["exibidas"] == 25
+    assert e.pair_evidence_meta["truncado"] is False
+    assert len(e.pair_evidence) == 25
+
+
+@pytest.mark.parametrize("limite", [0, 1, 5, 20, 100])
+def test_nem_a_contagem_nem_a_classificacao_dependem_do_limite(limite):
+    """
+    O limite e de exibicao, e nada mais.
+
+    Uma evidencia cortada nao pode mudar quantos pares divergiram nem o que
+    a entrada e.
+    """
+    a, b = muitas_divergencias(25)
+    cur = entrada_cursor({10: 25, 20: 25, 30: 0}, a, b)
+    e = assess_entry(cur, 855, "007", COLUNAS, RESULT_COLS, evidence_limit=limite)
+    assert e.pair_counts[DRIVER_ID_DIVERGENCE] == 25
+    assert e.pair_counts["total"] == 25
+    assert e.equivalence == SPORTING_EQUIVALENCE_WITH_IDENTITY_AMBIGUITY
+    assert e.verdict == REQUIRES_SPECIAL_HANDLING
+    assert e.pair_evidence_meta["divergencias"] == 25
+
+
+def test_o_relatorio_diz_como_ver_o_resto():
+    a, b = muitas_divergencias(25)
+    cur = entrada_cursor({10: 25, 20: 25, 30: 0}, a, b)
+    e = assess_entry(cur, 855, "007", COLUNAS, RESULT_COLS)
+    assert "--evidence-limit 0" in e.pair_evidence_meta["como_ver_o_resto"]
+
+
+def test_sem_divergencia_a_evidencia_fica_vazia_e_nao_truncada():
+    cur = entrada_cursor({10: 2, 20: 2, 30: 0},
+                         [volta(1), volta(2)], [volta(1), volta(2)])
+    e = assess_entry(cur, 855, "007", COLUNAS, RESULT_COLS)
+    assert e.pair_evidence == []
+    assert e.pair_evidence_meta == {"divergencias": 0, "exibidas": 0,
+                                    "truncado": False, "limite": 20,
+                                    "como_ver_o_resto": e.pair_evidence_meta[
+                                        "como_ver_o_resto"]}
