@@ -82,3 +82,7 @@ dashboard/dist/
 # Operational documentation — kept local, not published
 RUNTIME.md
 .local-ops/
+
+# Relatorio JUnit da suite de recuperacao (gerado pelo CI e por
+# quem rodar o mesmo comando localmente).
+recovery-results.xml
