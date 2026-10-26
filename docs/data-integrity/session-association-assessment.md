@@ -110,15 +110,35 @@ duplicados.** O sinal `CAR_SET_IDENTICAL_TO_OTHER_CHAMPIONSHIP` carrega a
 advertência no próprio campo de evidência, e informa, por sessão comparada,
 se o `result_content_digest` também coincide.
 
-`CONTENT_MULTIPLE_OF_SIBLING` usa **só** o digest de conteúdo, exige
-denominador positivo, e registra: id da sessão comparada, as duas contagens,
-a razão inteira, qual digest foi usado e a consulta que reproduz o caso.
+### 4.1 A multiplicação é uma pergunta sobre multiplicidades
 
-`MEASURED`, e vale registrar: **com o digest de conteúdo, esse sinal não
-ocorre nenhuma vez** no acervo. A multiplicação real é **dentro** da sessão
-— a 4986 tem 102 linhas para 34 carros distintos — e isso é a classe de
-triplicação da PR #57, **outro defeito**. O módulo a mede e reporta como
-`CARS_REPEATED_WITHIN_SESSION`, e **não a deixa classificar nada**.
+> **Corrigido na revisão da PR #63.** A primeira versão exigia
+> `result_content_digest` **igual** e contagens **diferentes** ao mesmo
+> tempo. Esse digest é sobre a lista inteira de linhas: comprimentos
+> diferentes produzem digests diferentes **por construção**. As duas
+> condições nunca podiam coexistir, e o zero que o sinal reportava **não
+> demonstrava ausência de multiplicação** — demonstrava que a pergunta
+> estava malformada.
+
+A comparação passou a ser por **multiset de assinaturas de linha**.
+`multiplicity_factor` exige, cumulativamente:
+
+- os dois multisets não vazios e as frequências de referência positivas;
+- **o mesmo conjunto de assinaturas** — quem repete não acrescenta;
+- **todas** as frequências o **mesmo** múltiplo inteiro das da referência;
+- fator **maior que 1**.
+
+A evidência registra id comparado, as duas contagens, o fator inteiro,
+quantas assinaturas distintas foram comparadas, o critério e a consulta que
+reproduz.
+
+`MEASURED`: o sinal ocorre **102 vezes** no acervo, onde a versão anterior
+reportava 0.
+
+A multiplicação **dentro** da sessão é outra coisa — a 4986 tem 102 linhas
+para 34 carros distintos — e é a classe de triplicação da PR #57, **outro
+defeito**. Reportada como `CARS_REPEATED_WITHIN_SESSION`, e **não classifica
+nada**.
 
 ---
 
@@ -135,7 +155,7 @@ triplicação da PR #57, **outro defeito**. O módulo a mede e reporta como
 | `CHAMPIONSHIP_NEVER_LOADED` | `CORPUS_DERIVED` | nenhuma classe exclusiva do campeonato existe |
 | `CLASS_PROFILE_FOREIGN` | `CORPUS_DERIVED` | classes fora do perfil do próprio campeonato |
 | `CAR_SET_IDENTICAL_TO_OTHER_CHAMPIONSHIP` | `CORPUS_DERIVED` | mesmo conjunto de carros, campeonato diferente |
-| `CONTENT_MULTIPLE_OF_SIBLING` | `CORPUS_DERIVED` | contagem é múltiplo inteiro, mesmo conteúdo |
+| `CONTENT_MULTIPLE_OF_SIBLING` | `CORPUS_DERIVED` | todas as frequências são o mesmo múltiplo inteiro das de um irmão |
 | `CHAMPIONSHIP_PROFILES_INDISTINGUISHABLE` | `CORPUS_DERIVED` | **ressalva** — o perfil não discrimina ali |
 
 ### 5.1 A ressalva nunca corrobora
@@ -178,10 +198,10 @@ medição `CORPUS_DERIVED` não é uma coorte.
 | classificação | sessões | resultados |
 |---|---:|---:|
 | `NO_NAME_AMBIGUITY` | 2.754 | 429.801 |
-| `AMBIGUOUS_NAME_ONLY` | 1.504 | 3.088 |
+| `AMBIGUOUS_NAME_ONLY` | 1.499 | 2.672 |
 | **`STRUCTURAL_INCOMPATIBILITY_COHORT`** | **496** | **108.818** |
 | `PROVENANCE_METADATA_INCONSISTENT` | 276 | 101.144 |
-| `ASSOCIATION_SUSPECT` | 227 | 25.066 |
+| `ASSOCIATION_SUSPECT` | 232 | 25.482 |
 | `UNDETERMINED_NO_PROVENANCE` | 168 | 356 |
 | total | **5.425** | |
 
@@ -194,8 +214,14 @@ Sinais: `AMBIGUOUS_SESSION_NAME` 2.244, `CARS_REPEATED_WITHIN_SESSION` 2.670,
 `CHAMPIONSHIP_LAYER_NOT_APPLICABLE` 1.456,
 `CAR_SET_IDENTICAL_TO_OTHER_CHAMPIONSHIP` 967,
 `CHAMPIONSHIP_NEVER_LOADED` 497, `NO_PROVENANCE_URL` 168,
-`CLASS_PROFILE_FOREIGN` 86 (84 ELMS, 2 IMSA), `CHAMPIONSHIP_PROFILES_INDISTINGUISHABLE` 59,
-`CONTENT_MULTIPLE_OF_SIBLING` **0**.
+`CLASS_PROFILE_FOREIGN` 86 (84 ELMS, 2 IMSA),
+`CONTENT_MULTIPLE_OF_SIBLING` **102**,
+`CHAMPIONSHIP_PROFILES_INDISTINGUISHABLE` 59.
+
+**Os totais acima são do conjunto inteiro de sinais**, calculados antes de
+qualquer truncamento. `--evidence-limit` limita o que é listado por sessão,
+e os números globais são idênticos com 0, 1 e o padrão — há teste que fixa
+isso, e foi verificado no acervo.
 
 ---
 
@@ -227,11 +253,20 @@ sessões caíam fora dele.
 O módulo trata irmão sem URL **como irmão**, que é o correto: o `LIMIT 1`
 podia devolvê-lo. Dois casos a menos, por uma diferença deliberada.
 
-### 8.3 104 → 0 multiplicações entre irmãos
+### 8.3 104 → 102 multiplicações entre irmãos
 
-A medição anterior usava igualdade de **conjunto de carros**. Com o digest
-de **conteúdo**, como o contrato exige, **nenhum caso sobrevive** — a
-multiplicação real é dentro da sessão (§4).
+A medição exploratória anterior usava igualdade de **conjunto de carros**,
+e achava 104. A primeira versão deste módulo achava **0**, mas por um
+defeito (§4.1): pedia o impossível. Com a comparação por multiset, o
+número é **102**.
+
+Os 2 de diferença para os 104 vêm do critério mais estrito: conjunto de
+carros igual não exige que as **linhas** sejam as mesmas repetidas, nem que
+todas as frequências partilhem o fator.
+
+`DERIVED`: a entrada do sinal moveu **5 sessões** de `AMBIGUOUS_NAME_ONLY`
+para `ASSOCIATION_SUSPECT` — as que antes só tinham sinais observacionais.
+As outras 97 já tinham outro sinal derivado. **A coorte não mudou.**
 
 ---
 

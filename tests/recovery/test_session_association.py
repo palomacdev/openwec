@@ -62,6 +62,8 @@ from database.recovery.session_association import (  # noqa: E402
     layer_of,
     multiple_of_sibling,
     read_sessions,
+    content_multiset,
+    multiplicity_factor,
     result_content_digest,
     signals_for,
     write_report,
@@ -81,7 +83,8 @@ def sessao(sid: int, *, evento: int = 1, nome: str = "Practice 1",
            serie: str = "IMSA", url: str | None = URL_VP,
            carros: list | None = None, classes: list | None = None,
            resultados: int | None = None, voltas: int = 0,
-           conteudo: str | None = None) -> SessionRow:
+           conteudo: str | None = None,
+           linhas: list | None = None) -> SessionRow:
     numeros = carros if carros is not None else []
     s = SessionRow(session_id=sid, event_id=evento, name=nome,
                    raw_id=f"2024071208{sid:02d}_{nome}", session_at=None,
@@ -94,8 +97,10 @@ def sessao(sid: int, *, evento: int = 1, nome: str = "Practice 1",
     s.results = len(numeros) if resultados is None else resultados
     s.laps = voltas
     s.car_set = car_set_digest(numeros)
+    brutas = linhas if linhas is not None else [(n,) for n in numeros]
     s.content = conteudo if conteudo is not None else (
-        result_content_digest([(n,) for n in numeros]) if numeros else None)
+        result_content_digest(brutas) if brutas else None)
+    s.content_multiset = content_multiset(brutas) if brutas else {}
     return s
 
 
@@ -195,35 +200,100 @@ def test_o_sinal_de_conjunto_igual_avisa_que_nao_e_prova():
 
 # ── A multiplicacao, com a evidencia que o ajuste 5 exige ─────
 
-def test_multiplo_de_irmao_registra_tudo_o_que_e_preciso_para_reproduzir():
-    irmao = sessao(2, carros=["1", "2"], conteudo="mesmo")
-    alvo = sessao(1, carros=["1", "2"], resultados=6, conteudo="mesmo")
-    ev = multiple_of_sibling(alvo, [irmao])
+def linha_de(numero, posicao):
+    return (numero, "GTD", posicao, "Classified", 30, "1:00")
+
+
+def test_multiplicacao_proporcional_e_detectada_e_documentada():
+    """
+    Positivo: a sessao carrega cada linha tres vezes. O digest sozinho nao
+    veria isso — listas de tamanhos diferentes diferem por construcao —,
+    e por isso a comparacao e por multiset.
+    """
+    base = [linha_de("1", 1), linha_de("2", 2)]
+    ref = sessao(2, carros=["1", "2"], linhas=base)
+    alvo = sessao(1, carros=["1", "2"], resultados=6, linhas=base * 3)
+    assert ref.content != alvo.content          # o digest difere, e isso e o ponto
+    ev = multiple_of_sibling(alvo, [ref])
     assert ev["comparada_com"] == 2
     assert ev["resultados_desta"] == 6
     assert ev["resultados_da_comparada"] == 2
     assert ev["razao_inteira"] == 3
-    assert ev["digest_usado"] == "result_content_digest"
+    assert ev["assinaturas_distintas"] == 2
+    assert "MESMO multiplo inteiro" in ev["criterio"]
+    assert "multiset" in ev["digest_usado"]
     assert "SELECT" in ev["como_reproduzir"]
 
 
+def test_o_fator_precisa_ser_o_mesmo_em_todas_as_assinaturas():
+    """
+    Negativo: uma linha dobra e a outra triplica. Isso nao e uma sessao
+    carregada n vezes, e o sinal recusa.
+    """
+    ref = content_multiset([linha_de("1", 1), linha_de("2", 2)])
+    desproporcional = content_multiset(
+        [linha_de("1", 1)] * 2 + [linha_de("2", 2)] * 3)
+    assert multiplicity_factor(desproporcional, ref) is None
+
+
+def test_fator_um_nao_e_multiplicacao():
+    base = [linha_de("1", 1), linha_de("2", 2)]
+    assert multiplicity_factor(content_multiset(base),
+                               content_multiset(base)) is None
+
+
+def test_conteudo_diferente_nao_e_multiplicacao():
+    """Negativo: mesmos carros, linhas diferentes."""
+    ref = sessao(2, carros=["1", "2"],
+                 linhas=[linha_de("1", 1), linha_de("2", 2)])
+    alvo = sessao(1, carros=["1", "2"], resultados=4,
+                  linhas=[linha_de("1", 9), linha_de("2", 8)] * 2)
+    assert multiple_of_sibling(alvo, [ref]) is None
+
+
+def test_assinaturas_a_mais_nao_sao_multiplicacao():
+    """
+    Negativo: a candidata tem tudo o que a referencia tem, em dobro, MAIS
+    uma linha que a referencia nao tem. Quem repete nao acrescenta.
+    """
+    ref = content_multiset([linha_de("1", 1)])
+    com_extra = content_multiset([linha_de("1", 1)] * 2 + [linha_de("9", 5)])
+    assert multiplicity_factor(com_extra, ref) is None
+
+
+def test_mesma_quantidade_de_carros_nao_basta():
+    """
+    Negativo: duas sessoes com 2 carros cada e contagens 6 e 2. A razao
+    inteira existe, e o conteudo nao coincide.
+    """
+    ref = sessao(2, carros=["1", "2"],
+                 linhas=[linha_de("1", 1), linha_de("2", 2)])
+    alvo = sessao(1, carros=["7", "8"], resultados=6,
+                  linhas=[linha_de("7", 1), linha_de("8", 2)] * 3)
+    assert alvo.results % ref.results == 0      # a quantidade bate...
+    assert multiple_of_sibling(alvo, [ref]) is None   # ...e nao basta
+
+
 def test_o_denominador_precisa_ser_positivo():
-    vazio = sessao(2, carros=[], resultados=0, conteudo="mesmo")
-    alvo = sessao(1, carros=["1"], resultados=6, conteudo="mesmo")
+    vazio = sessao(2, carros=[], resultados=0)
+    alvo = sessao(1, carros=["1"], resultados=6,
+                  linhas=[linha_de("1", 1)] * 6)
     assert multiple_of_sibling(alvo, [vazio]) is None
+    assert multiplicity_factor({"a": 2}, {}) is None
+    assert multiplicity_factor({}, {"a": 1}) is None
 
 
-def test_a_multiplicacao_usa_o_digest_de_conteudo_e_nao_o_de_carros():
-    """Mesmos carros, conteudos diferentes: nao e multiplicacao."""
-    irmao = sessao(2, carros=["1", "2"], conteudo="A")
-    alvo = sessao(1, carros=["1", "2"], resultados=6, conteudo="B")
-    assert multiple_of_sibling(alvo, [irmao]) is None
-
-
-def test_razao_nao_inteira_nao_e_multiplicacao():
-    irmao = sessao(2, carros=["1", "2", "3"], resultados=4, conteudo="m")
-    alvo = sessao(1, carros=["1"], resultados=6, conteudo="m")
-    assert multiple_of_sibling(alvo, [irmao]) is None
+def test_o_digest_de_conteudo_nao_responde_a_pergunta_de_multiplicidade():
+    """
+    O defeito da primeira versao, fixado: exigir digest igual E contagens
+    diferentes e pedir o impossivel.
+    """
+    base = [linha_de("1", 1)]
+    um = result_content_digest(base)
+    tres = result_content_digest(base * 3)
+    assert um != tres
+    assert multiplicity_factor(content_multiset(base * 3),
+                               content_multiset(base)) == 3
 
 
 def test_repeticao_dentro_da_sessao_e_observada_e_nao_classifica():
@@ -538,3 +608,58 @@ def test_a_ressalva_nao_completa_a_coorte():
     assert CHAMPIONSHIP_NEVER_LOADED in nomes
     assert CHAMPIONSHIP_PROFILES_INDISTINGUISHABLE in nomes
     assert r[1]["classification"] == PROVENANCE_METADATA_INCONSISTENT
+
+
+# ── O limite e apresentacao, nunca contagem ──────────────────
+
+def test_os_totais_globais_de_sinais_nao_dependem_do_limite():
+    """
+    A regressao que isto fixa: `assess_all` somava os sinais DEPOIS do
+    truncamento, de modo que `--evidence-limit 1` reduzia um numero global.
+    O limite e apresentacao; contar depois de truncar o tornava semantico.
+    """
+    from database.recovery.session_association import DEFAULT_EVIDENCE_LIMIT
+
+    cur_args = [
+        [(1, 10, "Practice 1", "r1", "2024-07-12", URL_VP, "E", "2024", "IMSA"),
+         (2, 10, "Practice 1", "r2", "2024-07-12", URL_WT, "E", "2024", "IMSA"),
+         (3, 10, "Outra", "r3", "2024-07-12", URL_WT, "E", "2024", "IMSA")],
+        [(1, "9", "GTD", 1, "Classified", 30, "1:00"),
+         (1, "9", "GTD", 1, "Classified", 30, "1:00"),
+         (1, "7", "GTD", 2, "Classified", 29, "1:01"),
+         (3, "5", "GTD", 1, "Classified", 30, "1:00")],
+        [(1, 10)],
+    ]
+
+    def correr(limite):
+        from database.recovery.session_association import assess_all
+        return assess_all(CursorFalso([list(x) for x in cur_args]), limite)
+
+    zero = correr(0)
+    um = correr(1)
+    padrao = correr(DEFAULT_EVIDENCE_LIMIT)
+
+    assert zero["sinais"] == um["sinais"] == padrao["sinais"]
+    assert zero["classificacoes"] == um["classificacoes"] == padrao["classificacoes"]
+    assert (zero["resultados_por_classificacao"]
+            == um["resultados_por_classificacao"]
+            == padrao["resultados_por_classificacao"])
+    assert (zero["voltas_por_classificacao"]
+            == um["voltas_por_classificacao"]
+            == padrao["voltas_por_classificacao"])
+    # e o truncamento de fato aconteceu em algum lugar
+    assert any(a["signals_meta"]["truncado"] for a in um["sessions"])
+    assert not any(a["signals_meta"]["truncado"] for a in zero["sessions"])
+
+
+def test_os_metadados_de_truncamento_dizem_quantos_havia():
+    sessoes = [sessao(1, url=URL_VP, carros=["1", "2"], classes=["GTD"]),
+               sessao(2, url=URL_WT, carros=[], resultados=0),
+               sessao(3, nome="Outra", url=URL_WT, carros=["5"], classes=["GTD"])]
+    (a, _, _) = assess_sessions(sessoes, 1)
+    assert a.signals_meta["total"] > 1
+    assert a.signals_meta["exibidos"] == 1
+    assert a.signals_meta["truncado"] is True
+    assert a.signals_meta["limite"] == 1
+    assert len(a.signal_names) == a.signals_meta["total"]
+    assert "--evidence-limit 0" in a.signals_meta["como_ver_o_resto"]

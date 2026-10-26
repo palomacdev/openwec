@@ -299,10 +299,72 @@ def result_content_digest(linhas: list[tuple]) -> str | None:
     Over the result rows themselves, sorted.
 
     Two sessions with this digest equal hold the same results, not merely
-    the same cars. This is the one that can support a duplication question —
-    and even then only support it.
+    the same cars. **It answers "are these the same rows", and it cannot
+    answer "are these the same rows repeated".** Lists of different lengths
+    produce different digests by construction, so asking for an equal digest
+    *and* different counts asks for something impossible — see
+    `multiplicity_factor`, which is what the multiplication question needs.
     """
-    return digest(sorted(str(linha) for linha in linhas))
+    return digest(sorted(row_signature(linha) for linha in linhas))
+
+
+def row_signature(linha) -> str:
+    """One result row, as the string the multiplicity comparison counts."""
+    return "\x1e".join("" if v is None else str(v) for v in linha)
+
+
+def content_multiset(linhas: list[tuple]) -> dict[str, int]:
+    """
+    How many times each row signature occurs.
+
+    The multiset is what a multiplication question is actually about: a
+    session loaded three times holds every row three times, and that is
+    invisible to a digest over the sorted list, which simply differs.
+    """
+    contagem: dict[str, int] = {}
+    for linha in linhas:
+        assinatura = row_signature(linha)
+        contagem[assinatura] = contagem.get(assinatura, 0) + 1
+    return contagem
+
+
+def multiplicity_factor(candidata: dict[str, int],
+                        referencia: dict[str, int]) -> int | None:
+    """
+    The integer factor by which one session repeats another, or None.
+
+    A real multiplication requires **all** of:
+
+      · both multisets are non-empty, and the reference counts are positive
+      · the two hold **the same row signatures** — a session that repeats
+        another holds nothing it did not hold
+      · every signature's count is the **same** integer multiple of the
+        reference's
+      · that factor is greater than 1
+
+    Any of those failing is not a multiplication. A session that merely has
+    more rows, or the same number of cars, or some signatures in common,
+    returns None.
+    """
+    if not candidata or not referencia:
+        return None
+    if set(candidata) != set(referencia):
+        return None
+    fator: int | None = None
+    for assinatura, base in referencia.items():
+        if base <= 0:                       # denominador positivo
+            return None
+        n = candidata[assinatura]
+        if n % base:
+            return None
+        atual = n // base
+        if fator is None:
+            fator = atual
+        elif atual != fator:                # as frequencias nao sao proporcionais
+            return None
+    if fator is None or fator <= 1:
+        return None
+    return fator
 
 
 # ── Reading ──────────────────────────────────────────────────
@@ -346,6 +408,7 @@ class SessionRow:
     classes: list = dataclass_field(default_factory=list)
     car_set: str | None = None
     content: str | None = None
+    content_multiset: dict = dataclass_field(default_factory=dict)
 
     def as_dict(self) -> dict:
         return dict(self.__dict__)
@@ -380,6 +443,7 @@ def read_sessions(cur) -> list[SessionRow]:
         s.classes = sorted({linha[1] for linha in conteudo if linha[1]})
         s.car_set = car_set_digest(s.car_numbers)
         s.content = result_content_digest(conteudo)
+        s.content_multiset = content_multiset(conteudo)
 
     cur.execute(LAPS_SQL)
     for sid, n in cur.fetchall():
@@ -459,33 +523,42 @@ class Signal:
 
 def multiple_of_sibling(s: SessionRow, irmaos: list[SessionRow]) -> dict | None:
     """
-    Whether this session's result count is an integer multiple of a
-    same-name sibling holding the **same results**.
+    Whether this session repeats a same-name sibling, proportionally.
 
-    The comparison is on `result_content_digest`, not on the car set: the
-    question is whether the same rows are there several times over. The
-    denominator must be positive, and the evidence records both counts, the
-    ratio and which digest was used, so the case is reproducible.
+    **The first version of this asked for something impossible.** It
+    required `result_content_digest` to be equal *and* the counts to
+    differ — and that digest is over the whole sorted list, so lists of
+    different lengths differ by construction. The two conditions could
+    never both hold, and the zero it reported demonstrated nothing.
+
+    The question is about **multiplicities**, so it is asked of the row
+    multiset: the same signatures, every one of them the same integer
+    multiple, factor above 1. `multiplicity_factor` holds that rule.
+
+    The evidence records the compared session, both counts, the integer
+    factor, how many distinct signatures were compared and the query that
+    reproduces it.
     """
-    if not s.results or not s.content:
+    if not s.results or not s.content_multiset:
         return None
     for outro in irmaos:
         if outro.session_id == s.session_id:
             continue
         if outro.results <= 0:                      # denominador positivo
             continue
-        if outro.content != s.content:
-            continue
-        if s.results <= outro.results:
-            continue
-        if s.results % outro.results:
+        fator = multiplicity_factor(s.content_multiset, outro.content_multiset)
+        if fator is None:
             continue
         return {
             "comparada_com": outro.session_id,
             "resultados_desta": s.results,
             "resultados_da_comparada": outro.results,
-            "razao_inteira": s.results // outro.results,
-            "digest_usado": "result_content_digest",
+            "razao_inteira": fator,
+            "assinaturas_distintas": len(s.content_multiset),
+            "criterio": ("todas as frequencias desta sessao sao o MESMO "
+                         "multiplo inteiro das da comparada, e o conjunto "
+                         "de assinaturas e identico"),
+            "digest_usado": "multiset de assinaturas de linha",
             "digest": s.content,
             "como_reproduzir": (
                 f"SELECT session_id, count(*) FROM results WHERE session_id "
@@ -675,6 +748,8 @@ class SessionAssessment:
     independent_evidence: list = dataclass_field(default_factory=list)
     classification: str = NO_NAME_AMBIGUITY
     meaning: str = ""
+    signal_names: list = dataclass_field(default_factory=list)
+    signals_meta: dict = dataclass_field(default_factory=dict)
     o_que_isto_nao_e: str = WHAT_THIS_IS_NOT
 
     def as_dict(self) -> dict:
@@ -708,6 +783,10 @@ def assess_sessions(sessoes: list[SessionRow],
     for s in sessoes:
         sinais = signals_for(s, por_evento, perfis, nunca, iguais)
         classe = classify(s, sinais)
+        # Os totais sao do conjunto INTEIRO. Truncar e apresentacao, e
+        # contar depois de truncar faria `--evidence-limit` mudar um numero
+        # global, que e exatamente o que ele nao pode fazer.
+        todos = [sig.name for sig in sinais]
         mostrados = sinais if evidence_limit <= 0 else sinais[:evidence_limit]
         a = SessionAssessment(
             session={
@@ -727,6 +806,17 @@ def assess_sessions(sessoes: list[SessionRow],
             independent_evidence=[],
             classification=classe,
             meaning=CLASSIFICATION_MEANING[classe],
+            signal_names=todos,
+            signals_meta={
+                "total": len(todos),
+                "exibidos": len(mostrados),
+                "truncado": len(mostrados) < len(todos),
+                "limite": evidence_limit,
+                "como_ver_o_resto": (
+                    "--evidence-limit 0 lista todos os sinais; as contagens "
+                    "globais, os resultados e a classificacao nao dependem "
+                    "deste limite"),
+            },
         )
         saida.append(a)
     return saida
@@ -755,8 +845,10 @@ def assess_all(cur, evidence_limit: int = DEFAULT_EVIDENCE_LIMIT) -> dict:
         serie = a.session["series"]
         por_serie.setdefault(serie, {})
         por_serie[serie][c] = por_serie[serie].get(c, 0) + 1
-        for sig in a.signals:
-            sinais[sig["signal"]] = sinais.get(sig["signal"], 0) + 1
+        # `signal_names` e o conjunto inteiro, capturado antes do
+        # truncamento; somar `a.signals` contaria so o que coube na tela.
+        for nome in a.signal_names:
+            sinais[nome] = sinais.get(nome, 0) + 1
 
     return {
         "sessoes": len(avaliadas),
