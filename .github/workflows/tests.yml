@@ -83,6 +83,44 @@ jobs:
       - name: Run enrichment guard tests (no DB needed)
         run: pytest tests/enrichment/ -v
 
+      # The recovery suites of PRs #53-#59 had never run here: the job lists
+      # its directories one by one and this one was simply missing from the
+      # list. They need no database — every psycopg2 import on their path is
+      # lazy and no test opens a connection — so no env is given to this
+      # step on purpose. With no DB_HOST, DB_PORT or DB_PASSWORD in scope,
+      # a test that tried to connect would have nothing to connect to.
+      - name: Run recovery assessment tests (no DB needed)
+        run: |
+          pytest tests/recovery/ -v -ra --strict-markers \
+            --junitxml=recovery-results.xml
+
+      # pytest exits non-zero on a failure and on an empty collection, but
+      # it exits zero on a test that quietly skipped itself. This suite is
+      # pure unit tests over a fake cursor: a skip here means something
+      # regressed, so it is an error until someone declares otherwise.
+      - name: Report recovery test counts
+        if: always()
+        run: |
+          python - <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          raiz = ET.parse("recovery-results.xml").getroot()
+          suite = raiz if raiz.tag == "testsuite" else raiz.find("testsuite")
+          n = {k: int(suite.get(k, 0))
+               for k in ("tests", "failures", "errors", "skipped")}
+          aprovados = n["tests"] - n["failures"] - n["errors"] - n["skipped"]
+          print(f"collected {n['tests']}  passed {aprovados}  "
+                f"failed {n['failures']}  errors {n['errors']}  "
+                f"skipped {n['skipped']}")
+          if n["tests"] == 0:
+              sys.exit("nenhum teste de recuperacao foi coletado")
+          if n["failures"] or n["errors"]:
+              sys.exit(f"{n['failures']} falha(s) e {n['errors']} erro(s) "
+                       f"na suite de recuperacao")
+          if n["skipped"]:
+              sys.exit(f"{n['skipped']} teste(s) de recuperacao foram "
+                       f"ignorados; esta suite nao deve ignorar nenhum")
+          PY
+
       - name: Run SDK tests (no DB needed)
         run: pytest tests/sdk/ -v
 
