@@ -82,6 +82,12 @@ homônimos produzem a mesma chave e nada nesta tabela os separa.
 
 ### 3.1 O ponto cego da própria dobra
 
+> **Corrigido pela PR #62.** A primeira versão desta seção dizia **"40
+> grupos só existem dobrando acento"**. Isso estava errado: `fold_blind_spot`
+> contava **chaves** e as relatava como grupos. O número correto de
+> agrupamentos afetados é **38**, e a reconciliação está abaixo. Os dois
+> defeitos, e a correção, estão na própria função.
+
 `MEASURED`: `full_name_key` dobra caixa e pontuação e **não diacríticos**.
 
 | | |
@@ -90,17 +96,65 @@ homônimos produzem a mesma chave e nada nesta tabela os separa.
 | grupos se os diacríticos também fossem dobrados | 1.056 |
 | linhas em grupos, dobra atual | **2.219** |
 | linhas em grupos, com acento dobrado | 2.236 |
-| grupos que **só** existem dobrando acento | **40** |
 
-`Jérôme De Sadeleer` tem cinco linhas em três variantes de acento
-(`Jerome`, `Jérome`, `Jérôme`) e **este módulo não compara nenhuma delas
-entre si**. O mesmo vale para `François Perrodo`, `Jörg Bergmeister`,
-`André Lotterer` e mais 36.
+#### Chaves não são agrupamentos
 
-`DERIVED`: **1.079 é um limite inferior.** Dizer "1.079 grupos" sem dizer
-isso superestimaria a cobertura. A dobra **não foi alterada** — ela precisa
-continuar sendo a do carregador — e o número é medido e reportado por
-`fold_blind_spot`, que não muda chave, grupo nem classificação alguma.
+`MEASURED`:
+
+| | |
+|---|---:|
+| chaves alternativas — chaves dobradas que não nomeiam um grupo hoje | **40** |
+| dessas, **sem** efeito no agrupamento | **29** |
+| agrupamentos alterados cuja chave **já** nomeava um grupo | **27** |
+| **agrupamentos efetivamente alterados** | **38** |
+
+`40 − 29 + 27 = 38`.
+
+A contagem antiga errava nas duas direções:
+
+- **29 falsos positivos.** `andrelotterer` entrava na lista, mas as linhas
+  `2134` e `333070` **já são grupo hoje**, sob a chave acentuada
+  `andrélotterer`. A chave perdeu o acento; o agrupamento não mudou. O
+  módulo enxergava todas essas o tempo todo.
+- **27 falsos negativos.** `antoniofelixdacosta` já nomeia um grupo, então
+  não era contado — embora absorva `antóniofélixdacosta`, que é uma
+  mudança real de agrupamento.
+
+#### A estrutura dos 38
+
+`MEASURED`, e cada rótulo é uma afirmação sobre **estrutura de
+agrupamento**, nunca sobre pessoas:
+
+| estrutura | agrupamentos | o que seria |
+|---|---:|---|
+| `FUNDE_GRUPOS_EXISTENTES` | **25** | duas ou mais chaves que já são grupo passariam a ser uma |
+| `INCORPORA_REGISTROS_ISOLADOS` | **11** | um grupo existente passaria a conter linhas hoje isoladas |
+| `NOVO_AGRUPAMENTO` | **2** | linhas hoje isoladas passariam a se agrupar entre si |
+
+| | |
+|---|---:|
+| registros envolvidos | **143** |
+| dos quais hoje isolados | **17** |
+| voltas | **119.198** |
+| `result_drivers` | **13.207** |
+
+`DERIVED`: **a maioria não é um grupo novo.** 25 dos 38 são componentes
+conectados entre grupos que este módulo já classifica separadamente. Dizer
+"40 grupos novos" confundia três coisas distintas — chave, agrupamento e
+pessoa.
+
+`Jérôme De Sadeleer` é o caso exemplar: cinco linhas em três chaves atuais
+(`jeromedesadeleer`, `jéromedesadeleer`, `jérômedesadeleer`), das quais
+**duas já são grupo**. Dobrar acento as fundiria num agrupamento de cinco,
+com 1.359 voltas e 48 `result_drivers` — e **sem nenhuma evidência
+independente em linha alguma**, o que o mantém `INSUFFICIENT_EVIDENCE`.
+
+`DERIVED`: **1.079 é um limite inferior.** A dobra **não foi alterada** —
+ela precisa continuar sendo a do carregador — e os 38 são medidos e
+expostos por `fold_blind_spot` e `variant_groupings`, que não mudam chave,
+grupo, classificação nem linha alguma. **Um agrupamento ali é equivalência
+textual sob uma dobra que não está em vigor: não é identidade provada e não
+autoriza fusão.**
 
 ---
 
@@ -363,7 +417,7 @@ Este módulo não altera as avaliações anteriores, e a garantia é
 árvore sintática, que nada de `triplication`, `carriers`, `merge_drivers`,
 `normalize_drivers`, `subprocess` ou `os` é importado, e que não há `exec`,
 `eval` nem `__import__`. Nenhum caminho de código daqui alcança aqueles
-vereditos. A suíte completa de `tests/recovery/` — 346 testes, incluindo os
+vereditos. A suíte completa de `tests/recovery/` — 355 testes, incluindo os
 das PRs #57 e #58 — continua passando.
 
 ### 7.3 Com a PR #58 (portadores de voltas)
@@ -527,8 +581,10 @@ não um default do servidor.
 
 ## 10. Riscos e limitações
 
-1. **1.079 é limite inferior** (§3.1): 40 grupos existem só dobrando acento
-   e não são avaliados.
+1. **1.079 é limite inferior** (§3.1): **38 agrupamentos** mudariam se os
+   diacríticos fossem dobrados — 25 fundindo grupos já existentes, 11
+   absorvendo linhas isoladas e 2 inteiramente novos — envolvendo 143
+   registros. Não são avaliados, e a dobra não foi alterada.
 2. **93% dos grupos não têm evidência a favor da fusão.** O risco não é
    errar um; é normalizar decidir por grafia.
 3. **A escala é a do acervo:** 75% das voltas e 62% dos `result_drivers`
@@ -542,10 +598,10 @@ não um default do servidor.
    publicados.
 6. **Rótulos homônimos entre documentos** (§7.2): `REVIEW_REQUIRED` e
    `CONFLICTING_EVIDENCE` existem na PR #46 com outra definição.
-7. **`tests/recovery/` não é executado no CI.** O workflow roda `schema`,
-   `loader`, `enrichment`, `sdk` e `api`. Os 50 testes deste módulo, como os
-   das PRs #53–#58, rodam apenas localmente. **Não alterei o pipeline**, por
-   estar fora do escopo autorizado; o registro fica aqui.
+7. ~~**`tests/recovery/` não é executado no CI.**~~ **Resolvido pela
+   PR #60** (`2ec5067`): o workflow passou a executar `tests/recovery/`, com
+   um passo que falha em coleta vazia, em falha e em qualquer `skip`. Os 59
+   testes deste módulo rodam no CI desde então.
 8. **Nenhuma fonte externa foi consultada.** As contradições da §5 ficam em
    aberto, não resolvidas.
 

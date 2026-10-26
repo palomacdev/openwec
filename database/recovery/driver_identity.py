@@ -288,35 +288,112 @@ def group_rows(cur, colunas: tuple[str, ...]) -> dict[str, list[DriverRow]]:
     return grupos
 
 
+# How a diacritic-folded grouping relates to the groups that exist today.
+# These are statements about **grouping structure**, never about people.
+VARIANT_MERGE = "FUNDE_GRUPOS_EXISTENTES"
+VARIANT_ABSORBS = "INCORPORA_REGISTROS_ISOLADOS"
+VARIANT_NEW = "NOVO_AGRUPAMENTO"
+VARIANT_UNCHANGED = "AGRUPAMENTO_INALTERADO"
+
+VARIANT_STRUCTURES = (VARIANT_MERGE, VARIANT_ABSORBS, VARIANT_NEW,
+                      VARIANT_UNCHANGED)
+
+VARIANT_MEANING = {
+    VARIANT_MERGE: ("duas ou mais chaves que hoje ja sao grupo passariam a "
+                    "ser um so agrupamento"),
+    VARIANT_ABSORBS: ("um grupo existente passaria a conter registros que "
+                      "hoje nao estao em grupo algum"),
+    VARIANT_NEW: ("registros hoje isolados passariam a formar um "
+                  "agrupamento entre si"),
+    VARIANT_UNCHANGED: ("as mesmas linhas, sob uma chave escrita sem "
+                        "acento: nada muda"),
+}
+
+
+def _sem_acento(s: str) -> str:
+    """Experimental fold, used to **compare** and never to group anything."""
+    import unicodedata
+
+    return "".join(c for c in unicodedata.normalize("NFD", s)
+                   if unicodedata.category(c) != "Mn")
+
+
+def variant_structure(ids: list[int], chave_de: dict[int, str],
+                      grupos_atuais: dict) -> str:
+    """
+    Which of the four shapes this folded grouping has.
+
+    The question is answered from the **current keys its members carry**,
+    not from the folded key's spelling. That is the distinction the first
+    version of this measurement missed.
+    """
+    origens = {chave_de[i] for i in ids}
+    ja_eram_grupo = {o for o in origens if o in grupos_atuais}
+    if len(origens) == 1:
+        return VARIANT_UNCHANGED
+    if len(ja_eram_grupo) >= 2:
+        return VARIANT_MERGE
+    if len(ja_eram_grupo) == 1:
+        return VARIANT_ABSORBS
+    return VARIANT_NEW
+
+
 def fold_blind_spot(todos: dict[str, list[DriverRow]]) -> dict:
     """
-    What this module's own grouping cannot see.
+    What this module's own grouping cannot see — counted as groupings.
 
     `full_name_key` folds case and punctuation and **not diacritics**, so
     `Jérôme` and `Jerome` are two keys and their rows are never compared
-    here. That is deliberate — the fold has to be the loader's, or a group
-    in this report would not be a group there — but it means the group
-    count is a **lower bound**, and saying 1.079 without saying that would
-    overstate the coverage.
+    here. That is deliberate: the fold has to be the loader's, or a group in
+    this report would not be a group there.
+
+    **The first version of this function counted keys and reported them as
+    groups, and the two are not the same thing.** It compared each folded
+    key against the set of keys that already name a group, which is wrong in
+    both directions:
+
+      · a folded key that merely lost an accent was counted as new even
+        when it groups exactly the same rows — `andrelotterer` against the
+        existing `andrélotterer`, the same two ids. **29 of the 40 it
+        reported were this**, and the module already saw every one of them.
+      · a grouping that genuinely changed was **not** counted when its
+        folded key happened to already name a group — `antoniofelixdacosta`
+        absorbing `antóniofélixdacosta`. **27 were missed this way.**
+
+    `40 − 29 + 27 = 38`. Both numbers are reported below under names that
+    say which is which, because the 40 is a true count of alternative keys
+    and a false count of anything else.
 
     Measured on the rows already read, so it costs no extra query, and
-    reported rather than acted on. **Nothing here changes a key, a group or
-    a classification.**
+    reported rather than acted on. **Nothing here changes a key, a group, a
+    classification or a row, and no grouping below is an identity.**
     """
-    import unicodedata
-
-    def sem_acento(s: str) -> str:
-        return "".join(c for c in unicodedata.normalize("NFD", s)
-                       if unicodedata.category(c) != "Mn")
-
     dobrado: dict[str, list[int]] = {}
     for chave, linhas in todos.items():
-        dobrado.setdefault(sem_acento(chave), []).extend(
+        dobrado.setdefault(_sem_acento(chave), []).extend(
             r.driver_id for r in linhas)
 
     atuais = {k: v for k, v in todos.items() if len(v) > 1}
     maiores = {k: v for k, v in dobrado.items() if len(v) > 1}
-    invisiveis = sorted(k for k in maiores if k not in atuais)
+    chave_de = {r.driver_id: k for k, linhas in todos.items() for r in linhas}
+    voltas = {r.driver_id: r.laps for linhas in todos.values() for r in linhas}
+    vinculos = {r.driver_id: r.result_drivers
+                for linhas in todos.values() for r in linhas}
+
+    estrutura = {k: variant_structure(ids, chave_de, atuais)
+                 for k, ids in maiores.items()}
+    alterados = sorted(k for k, e in estrutura.items()
+                       if e != VARIANT_UNCHANGED)
+    chaves_alternativas = sorted(k for k in maiores if k not in atuais)
+    sem_efeito = [k for k in chaves_alternativas
+                  if estrutura[k] == VARIANT_UNCHANGED]
+
+    envolvidos = sorted({i for k in alterados for i in maiores[k]})
+    em_grupo = {r.driver_id for v in atuais.values() for r in v}
+    por_estrutura: dict[str, int] = {}
+    for k in alterados:
+        por_estrutura[estrutura[k]] = por_estrutura.get(estrutura[k], 0) + 1
+
     return {
         "dobra_usada": ("full_name_key de row_identity: caixa e pontuacao, "
                         "nao diacriticos"),
@@ -325,11 +402,84 @@ def fold_blind_spot(todos: dict[str, list[DriverRow]]) -> dict:
         "linhas_com_a_dobra_atual": sum(len(v) for v in atuais.values()),
         "linhas_se_diacriticos_fossem_dobrados": sum(
             len(v) for v in maiores.values()),
-        "grupos_que_so_existem_dobrando_acento": len(invisiveis),
-        "exemplos": invisiveis[:20],
+        # Chaves, e so chaves. Este numero nao conta grupos nem pessoas.
+        "chaves_alternativas": len(chaves_alternativas),
+        "chaves_alternativas_sem_efeito_no_agrupamento": len(sem_efeito),
+        "agrupamentos_alterados": len(alterados),
+        "agrupamentos_alterados_por_estrutura": por_estrutura,
+        "significados": dict(VARIANT_MEANING),
+        "registros_envolvidos": len(envolvidos),
+        "registros_envolvidos_hoje_isolados": len(
+            [i for i in envolvidos if i not in em_grupo]),
+        "voltas_envolvidas": sum(voltas[i] for i in envolvidos),
+        "result_drivers_envolvidos": sum(vinculos[i] for i in envolvidos),
+        "exemplos": alterados[:20],
+        "reconciliacao": (
+            f"{len(chaves_alternativas)} chaves alternativas "
+            f"- {len(sem_efeito)} sem efeito no agrupamento "
+            f"+ {len(alterados) - (len(chaves_alternativas) - len(sem_efeito))} "
+            f"alterados cuja chave ja era chave de grupo "
+            f"= {len(alterados)} agrupamentos alterados"),
         "leitura": ("o numero de grupos e um limite inferior; estes nao sao "
-                    "avaliados por este modulo e nenhuma chave foi alterada"),
+                    "avaliados por este modulo, nenhuma chave foi alterada, "
+                    "e um agrupamento aqui e equivalencia textual, nunca "
+                    "identidade"),
     }
+
+
+def variant_groupings(todos: dict[str, list[DriverRow]],
+                      colunas: tuple[str, ...]) -> list[dict]:
+    """
+    The groupings a diacritic fold would change, one by one, with evidence.
+
+    This is the read-only exposure of the 38. Each entry says which current
+    keys it spans, which rows it would bring together, what the evidence
+    across those rows does, and **every driver id involved**. There is no
+    canonical row here either: the fold is not applied, nothing is merged,
+    and a grouping is a statement about text.
+    """
+    dobrado: dict[str, list[int]] = {}
+    for chave, linhas in todos.items():
+        dobrado.setdefault(_sem_acento(chave), []).extend(
+            r.driver_id for r in linhas)
+
+    atuais = {k: v for k, v in todos.items() if len(v) > 1}
+    chave_de = {r.driver_id: k for k, linhas in todos.items() for r in linhas}
+    por_id = {r.driver_id: r for linhas in todos.values() for r in linhas}
+
+    saida = []
+    for chave in sorted(dobrado):
+        ids = sorted(dobrado[chave])
+        if len(ids) < 2:
+            continue
+        estrutura = variant_structure(ids, chave_de, atuais)
+        if estrutura == VARIANT_UNCHANGED:
+            continue
+        linhas = [por_id[i] for i in ids]
+        e = compare_evidence(linhas, colunas)
+        origens = sorted({chave_de[i] for i in ids})
+        saida.append({
+            "chave_dobrada": chave,
+            "estrutura": estrutura,
+            "significado": VARIANT_MEANING[estrutura],
+            # Todos, sempre. Nenhum canonico e escolhido aqui tampouco.
+            "driver_ids": ids,
+            "grafias": [f"{r.first_name or ''}|{r.last_name or ''}"
+                        for r in linhas],
+            "chaves_atuais": origens,
+            "chaves_atuais_que_ja_sao_grupo": [o for o in origens if o in atuais],
+            "evidencia": {"concordante": sorted(e.agreeing),
+                          "contraditoria": sorted(e.contradicting),
+                          "exclusiva": sorted(e.exclusive),
+                          "ausente": sorted(e.absent)},
+            "classificacao_de_evidencia": classify(linhas, e)[0],
+            "laps": sum(r.laps for r in linhas),
+            "result_drivers": sum(r.result_drivers for r in linhas),
+            "o_que_isto_nao_e": ("equivalencia textual sob uma dobra que NAO "
+                                 "esta em vigor; nao e identidade provada e "
+                                 "nao autoriza fusao alguma"),
+        })
+    return saida
 
 
 # ── Comparing the evidence ───────────────────────────────────
@@ -818,6 +968,7 @@ def assess_all(cur, evidence_limit: int = DEFAULT_EVIDENCE_LIMIT) -> dict:
         "colunas_excluidas": dict(EXCLUDED_COLUMNS),
         "estabilidade_dos_atributos": estabilidade,
         "ponto_cego_da_dobra": fold_blind_spot(todos),
+        "agrupamentos_de_variante": variant_groupings(todos, colunas),
         "classificacoes": classificacoes,
         "significados": dict(MEANING),
         "tamanhos_de_grupo": {str(k): v for k, v in sorted(tamanhos.items())},
@@ -1114,8 +1265,15 @@ def main() -> int:
         print(f"  referencias: {dados['referencias']}")
         cego = dados["ponto_cego_da_dobra"]
         print(f"  ponto cego da dobra: "
-              f"{cego['grupos_que_so_existem_dobrando_acento']} grupos so "
-              f"existiriam dobrando acento (limite inferior)")
+              f"{cego['chaves_alternativas']} chaves alternativas, das quais "
+              f"{cego['chaves_alternativas_sem_efeito_no_agrupamento']} nao "
+              f"mudam agrupamento")
+        print(f"    agrupamentos alterados: {cego['agrupamentos_alterados']}  "
+              f"{cego['agrupamentos_alterados_por_estrutura']}")
+        print(f"    envolvem {cego['registros_envolvidos']} registros, "
+              f"{cego['voltas_envolvidas']} voltas, "
+              f"{cego['result_drivers_envolvidos']} result_drivers")
+        print(f"    {cego['reconciliacao']}")
         print(f"  impedimentos: {dados['impedimentos']}")
         print("  flags: " + "  ".join(
             f"{k}={v}" for k, v in sorted(dados["flags"].items())))
