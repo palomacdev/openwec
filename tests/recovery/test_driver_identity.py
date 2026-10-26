@@ -746,9 +746,11 @@ def test_a_dobra_nao_dobra_diacriticos_e_o_modulo_mede_isso():
     }
     cego = fold_blind_spot(todos)
     assert cego["grupos_com_a_dobra_atual"] == 1
-    assert cego["grupos_que_so_existem_dobrando_acento"] == 1
+    assert cego["agrupamentos_alterados"] == 1
     assert "jeromedesadeleer" in cego["exemplos"]
     assert "limite inferior" in cego["leitura"]
+    # `ø` nao decompoe, entao o grupo de Sørensen nao e tocado pela dobra.
+    assert cego["grupos_se_diacriticos_fossem_dobrados"] == 2
 
 
 def test_o_ponto_cego_nao_altera_nenhuma_chave_nem_classificacao():
@@ -841,3 +843,161 @@ def test_uma_linha_sozinha_nao_e_grupo_e_nao_e_classificada():
     ])
     with pytest.raises(DriverIdentityError, match="unica linha"):
         assess_one(cur, "Sozinho Unico")
+
+
+# ── Chaves nao sao agrupamentos, e agrupamentos nao sao pessoas ─
+
+def test_uma_chave_sem_acento_que_agrupa_as_mesmas_linhas_nao_e_novidade():
+    """
+    A regressao que motivou esta correcao.
+
+    `andrelotterer` aparecia como "grupo que so existe dobrando acento",
+    mas as duas linhas **ja sao grupo hoje** sob `andrélotterer`: a chave
+    perdeu o acento, o agrupamento nao mudou. 29 dos 40 casos eram disto.
+    """
+    from database.recovery.driver_identity import (
+        VARIANT_UNCHANGED, fold_blind_spot, variant_structure)
+
+    todos = {"andrélotterer": [linha(2134, "André", "LOTTERER"),
+                               linha(333070, "André", "Lotterer")]}
+    cego = fold_blind_spot(todos)
+    assert cego["chaves_alternativas"] == 1          # a chave e nova
+    assert cego["chaves_alternativas_sem_efeito_no_agrupamento"] == 1
+    assert cego["agrupamentos_alterados"] == 0       # o agrupamento nao e
+    assert cego["exemplos"] == []
+    atuais = {k: v for k, v in todos.items() if len(v) > 1}
+    chave_de = {r.driver_id: k for k, v in todos.items() for r in v}
+    assert variant_structure([2134, 333070], chave_de, atuais) == VARIANT_UNCHANGED
+
+
+def test_um_agrupamento_alterado_conta_mesmo_quando_a_chave_ja_era_de_grupo():
+    """
+    O outro lado do mesmo erro: `antoniofelixdacosta` ja nomeia um grupo, e
+    por isso a contagem antiga nao via que ele absorveria
+    `antóniofélixdacosta`. 27 casos eram deste lado.
+    """
+    from database.recovery.driver_identity import VARIANT_MERGE, fold_blind_spot
+
+    todos = {
+        "antoniofelixdacosta": [linha(4188, "Antonio Felix", "Da Costa"),
+                                linha(335124, "Antonio FELIX DA", "COSTA")],
+        "antóniofélixdacosta": [linha(4725, "António Félix", "Da Costa"),
+                                linha(335661, "António FÉLIX DA", "COSTA")],
+    }
+    cego = fold_blind_spot(todos)
+    assert cego["chaves_alternativas"] == 0          # a chave ja era de grupo
+    assert cego["agrupamentos_alterados"] == 1       # mas o agrupamento muda
+    assert cego["agrupamentos_alterados_por_estrutura"] == {VARIANT_MERGE: 1}
+    assert cego["registros_envolvidos"] == 4
+
+
+def test_a_reconciliacao_entre_as_duas_contagens_e_publicada():
+    from database.recovery.driver_identity import fold_blind_spot
+
+    todos = {
+        "andrélotterer": [linha(1, "André", "LOTTERER"),
+                          linha(2, "André", "Lotterer")],
+        "antoniofelixdacosta": [linha(3, "Antonio", "Da Costa"),
+                                linha(4, "ANTONIO", "DA COSTA")],
+        "antóniofélixdacosta": [linha(5, "António", "Da Costa"),
+                                linha(6, "ANTÓNIO", "DA COSTA")],
+    }
+    cego = fold_blind_spot(todos)
+    assert cego["chaves_alternativas"] == 1
+    assert cego["chaves_alternativas_sem_efeito_no_agrupamento"] == 1
+    assert cego["agrupamentos_alterados"] == 1
+    assert "= 1 agrupamentos alterados" in cego["reconciliacao"]
+
+
+# ── As quatro estruturas ──────────────────────────────────────
+
+def test_incorporacao_de_registro_isolado():
+    from database.recovery.driver_identity import VARIANT_ABSORBS, fold_blind_spot
+
+    todos = {
+        "françoisheriau": [linha(501386, "François", "Heriau")],      # isolada
+        "francoisheriau": [linha(40520, "Francois", "Heriau"),
+                           linha(328240, "FRANCOIS", "HERIAU")],      # grupo
+    }
+    cego = fold_blind_spot(todos)
+    assert cego["agrupamentos_alterados_por_estrutura"] == {VARIANT_ABSORBS: 1}
+    assert cego["registros_envolvidos"] == 3
+    assert cego["registros_envolvidos_hoje_isolados"] == 1
+
+
+def test_novo_agrupamento_so_de_registros_isolados():
+    from database.recovery.driver_identity import VARIANT_NEW, fold_blind_spot
+
+    todos = {"celiamartin": [linha(1, "Celia", "Martin")],
+             "céliamartin": [linha(2, "Célia", "Martin")]}
+    cego = fold_blind_spot(todos)
+    assert cego["agrupamentos_alterados_por_estrutura"] == {VARIANT_NEW: 1}
+    assert cego["registros_envolvidos_hoje_isolados"] == 2
+    assert cego["grupos_com_a_dobra_atual"] == 0
+
+
+def test_acentos_distintos_que_a_dobra_experimental_NAO_une():
+    """
+    `ø` nao tem decomposicao, entao nem a hipotese o dobra. Sørensen fica
+    fora de tudo isto — o que e o ponto: a hipotese nao e uma regra
+    linguistica, e a propria funcao mostra onde ela nao alcanca.
+    """
+    from database.recovery.driver_identity import fold_blind_spot
+
+    todos = {"marcosørensen": [linha(43, "Marco", "Sørensen"),
+                               linha(330979, "Marco", "SØRENSEN")],
+             "marcosorensen": [linha(99, "Marco", "Sorensen")]}
+    cego = fold_blind_spot(todos)
+    assert cego["agrupamentos_alterados"] == 0
+    assert cego["chaves_alternativas"] == 0
+
+
+# ── A exposicao read-only dos 38 ──────────────────────────────
+
+def test_os_agrupamentos_de_variante_devolvem_todos_os_ids_e_nenhum_canonico():
+    from database.recovery.driver_identity import VARIANT_MERGE, variant_groupings
+
+    todos = {
+        "antoniofelixdacosta": [linha(4188, "Antonio Felix", "Da Costa",
+                                      country="PRT", laps=301),
+                                linha(335124, "Antonio FELIX DA", "COSTA",
+                                      laps=200)],
+        "antóniofélixdacosta": [linha(4725, "António Félix", "Da Costa",
+                                      country="PRT", laps=367),
+                                linha(335661, "António FÉLIX DA", "COSTA",
+                                      laps=366)],
+    }
+    (g,) = variant_groupings(todos, EVID)
+    assert g["estrutura"] == VARIANT_MERGE
+    assert g["driver_ids"] == [4188, 4725, 335124, 335661]
+    assert g["chaves_atuais_que_ja_sao_grupo"] == ["antoniofelixdacosta",
+                                                   "antóniofélixdacosta"]
+    assert g["laps"] == 1234
+    assert "canonical_driver_id" not in g
+    assert "nao e identidade provada" in g["o_que_isto_nao_e"]
+
+
+def test_a_evidencia_do_agrupamento_separa_concordante_contraditoria_e_ausente():
+    from database.recovery.driver_identity import variant_groupings
+
+    todos = {
+        "marvinkirchhofer": [linha(45710, "Marvin", "Kirchhofer",
+                                   country="CHE", imsa_driver_id=3010),
+                             linha(53125, "Marvin", "Kirchhöfer",
+                                   country="DEU", imsa_driver_id=3010)],
+        "marvinkirchhöfer": [linha(4799, "Marvin", "KIRCHHÖFER", license="A")],
+    }
+    (g,) = variant_groupings(todos, EVID)
+    assert g["evidencia"]["concordante"] == ["imsa_driver_id"]
+    assert g["evidencia"]["contraditoria"] == ["country"]
+    assert g["evidencia"]["exclusiva"] == ["license"]
+    assert "short_name" in g["evidencia"]["ausente"]
+    assert g["classificacao_de_evidencia"] == CONFLICTING_EVIDENCE
+
+
+def test_agrupamentos_inalterados_nao_entram_na_exposicao():
+    from database.recovery.driver_identity import variant_groupings
+
+    todos = {"andrélotterer": [linha(1, "André", "LOTTERER"),
+                               linha(2, "André", "Lotterer")]}
+    assert variant_groupings(todos, EVID) == []
