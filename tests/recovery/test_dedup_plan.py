@@ -20,10 +20,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from database.recovery.dedup_plan import (  # noqa: E402
     DIVERGENT_LINKS,
+    EXTERNAL_REFERENCE,
     FACTOR_NOT_UNIFORM,
     NO_DUPLICATION,
     SIGNATURE_FIELDS,
     build_plan,
+    choose_preserved,
+    read_foreign_keys,
+    read_other_references,
     corroboration,
     digest,
     file_signature,
@@ -164,29 +168,61 @@ def test_vinculos_identicos_liberam_a_remocao():
 def test_piloto_so_na_copia_removivel_bloqueia_o_grupo():
     """
     O caso do acervo: `Tom Kimber-smith` 6179 nas cinco primeiras copias e
-    `Tom Kimber-Smith` 342905 nas duas ultimas. Decidir que sao a mesma
-    pessoa nao cabe aqui, entao o grupo fica.
+    `Tom Kimber-Smith` 342905 nas duas ultimas. Nenhuma copia carrega os
+    dois, entao nenhuma pode ficar sozinha, e decidir que sao a mesma
+    pessoa nao cabe aqui.
     """
     grupos = group_results(copias("4", [10, 20, 30]))
     vinculos = {10: {(1, 6178), (2, 6179)},
                 20: {(1, 6178), (2, 6179)},
                 30: {(1, 6178), (2, 342905)}}
+    assert choose_preserved([10, 20, 30], vinculos) is None
+
     p = plan_session(META, grupos, vinculos)
     assert p["ids_removiveis"] == []
     assert p["ids_preservados"] == [10, 20, 30]
     assert p["total_esperado"] == 3
     bloqueio = p["bloqueios"][0]
     assert bloqueio["motivo"] == DIVERGENT_LINKS
-    assert bloqueio["ids_divergentes"] == [30]
-    assert bloqueio["vinculos_ausentes"] == [(2, 342905)]
-    assert bloqueio["vinculos_preservados"] == [(1, 6178), (2, 6179)]
+    assert bloqueio["uniao_dos_vinculos"] == [(1, 6178), (2, 6179), (2, 342905)]
+    assert bloqueio["vinculos_por_id"]["30"] == [(1, 6178), (2, 342905)]
 
 
-def test_vinculo_ausente_aparece_uma_vez_por_mais_copias_que_o_carreguem():
+# ── A copia que carrega a uniao ──────────────────────────────
+
+def test_a_copia_com_todos_os_vinculos_fica_mesmo_nao_sendo_a_primeira():
+    """
+    O ajuste pedido: a primeira copia tem menos vinculos, outra tem todos.
+    Preserva-se a que ja carrega a uniao, sem criar nem mover vinculo.
+    """
     grupos = group_results(copias("4", [10, 20, 30]))
-    vinculos = {10: {(1, 6178)}, 20: {(1, 342905)}, 30: {(1, 342905)}}
+    vinculos = {10: {(1, 6178)},
+                20: {(1, 6178), (2, 6179)},
+                30: {(1, 6178)}}
+    assert choose_preserved([10, 20, 30], vinculos) == 20
+
     p = plan_session(META, grupos, vinculos)
-    assert len(p["bloqueios"][0]["vinculos_ausentes"]) == 1
+    assert p["ids_preservados"] == [20]
+    assert p["ids_removiveis"] == [10, 30]
+    assert p["result_drivers_preservados"] == 2
+    assert p["bloqueios"] == []
+
+
+def test_empate_entre_copias_completas_fica_com_o_menor_id():
+    vinculos = {i: {(1, 6178), (2, 6179)} for i in (10, 20, 30)}
+    assert choose_preserved([10, 20, 30], vinculos) == 10
+    assert choose_preserved([30, 10, 20], vinculos) == 30, (
+        "choose_preserved honra a ordem recebida; quem ordena e group_results")
+
+
+def test_sem_vinculo_nenhum_a_uniao_e_vazia_e_a_primeira_fica():
+    assert choose_preserved([10, 20], {}) == 10
+
+
+def test_uma_copia_a_mais_com_vinculo_novo_derruba_a_escolha_anterior():
+    """O contrapositivo: basta um vinculo que ninguem mais carregue."""
+    vinculos = {10: {(1, 1)}, 20: {(1, 1), (2, 2)}, 30: {(3, 3)}}
+    assert choose_preserved([10, 20, 30], vinculos) is None
 
 
 def test_um_grupo_bloqueado_nao_bloqueia_os_outros():
@@ -207,12 +243,63 @@ def test_copia_sem_vinculo_nenhum_pode_sair():
     assert p["ids_removiveis"] == [20]
 
 
-def test_preservada_sem_vinculo_e_removivel_com_vinculo_bloqueia():
-    """A direcao que importa: o que sairia leva vinculo que nao ficou."""
+def test_a_segunda_copia_com_vinculo_e_a_que_fica():
+    """
+    Sob a regra antiga a primeira ficava e o grupo bloqueava. Agora quem
+    carrega a uniao e preservada, e a remocao acontece sem perder vinculo.
+    """
     grupos = group_results(copias("4", [10, 20]))
     p = plan_session(META, grupos, {20: {(1, 6178)}})
+    assert p["ids_preservados"] == [20]
+    assert p["ids_removiveis"] == [10]
+    assert p["bloqueios"] == []
+
+
+# ── Qualquer outra coisa que aponte para um result ───────────
+
+def test_referencia_fora_de_result_drivers_bloqueia_o_grupo():
+    grupos = group_results(copias("4", [10, 20]))
+    p = plan_session(META, grupos, {}, None, {20: ["stints.result_id"]})
     assert p["ids_removiveis"] == []
-    assert p["bloqueios"][0]["motivo"] == DIVERGENT_LINKS
+    assert p["ids_preservados"] == [10, 20]
+    bloqueio = p["bloqueios"][0]
+    assert bloqueio["motivo"] == EXTERNAL_REFERENCE
+    assert bloqueio["referencias"] == {"20": ["stints.result_id"]}
+
+
+def test_referencia_na_copia_preservada_nao_bloqueia():
+    """Quem fica continua apontado; so a remocao e que precisa estar livre."""
+    grupos = group_results(copias("4", [10, 20]))
+    p = plan_session(META, grupos, {}, None, {10: ["stints.result_id"]})
+    assert p["ids_removiveis"] == [20]
+    assert p["bloqueios"] == []
+
+
+def test_sem_referencias_externas_nada_muda():
+    grupos = group_results(copias("4", [10, 20]))
+    assert plan_session(META, grupos, {}, None, {}) ==            plan_session(META, grupos, {}, None, None)
+
+
+def test_as_chaves_sao_lidas_do_catalogo_e_result_drivers_e_a_modelada():
+    cur = CursorFalso([[("result_drivers", "result_id", "c"),
+                        ("stints", "result_id", "a")]])
+    chaves = read_foreign_keys(cur)
+    assert chaves[0] == {"tabela": "result_drivers", "coluna": "result_id",
+                         "on_delete": "CASCADE", "modelada": True}
+    assert chaves[1] == {"tabela": "stints", "coluna": "result_id",
+                         "on_delete": "NO ACTION", "modelada": False}
+
+
+def test_a_chave_modelada_nao_e_consultada_de_novo():
+    cur = CursorFalso([[(7,), (9,)]])
+    chaves = [{"tabela": "result_drivers", "coluna": "result_id",
+               "on_delete": "CASCADE", "modelada": True},
+              {"tabela": "stints", "coluna": "result_id",
+               "on_delete": "NO ACTION", "modelada": False}]
+    assert read_other_references(cur, chaves) == {
+        7: ["stints.result_id"], 9: ["stints.result_id"]}
+    assert len(cur.executados) == 1
+    assert "stints" in cur.sql and "result_drivers" not in cur.sql
 
 
 # ── Corroboracao por arquivo ─────────────────────────────────
@@ -328,8 +415,9 @@ def linha_do_banco(session_id: int, result_id: int, numero: str) -> tuple:
     return (session_id, result_id, *campos(numero))
 
 
-def test_build_plan_le_tres_vezes_e_so_seleciona():
+def test_build_plan_so_seleciona():
     cur = CursorFalso([
+        [("result_drivers", "result_id", "c")],
         [linha_do_banco(2686, 10, "4"), linha_do_banco(2686, 20, "4")],
         [(10, 1, 6178), (20, 1, 6178)],
         [(2686, "Practice 1", "IMSA", "2016", "Belle Isle",
@@ -339,7 +427,10 @@ def test_build_plan_le_tres_vezes_e_so_seleciona():
     assert plano["contrato"] == "openwec-dedup-plan-v1"
     assert all(s.strip().upper().startswith("SELECT")
                for s, _ in cur.executados), "o planejador so le"
-    assert len(cur.executados) == 3
+    # as chaves, e depois results, result_drivers e sessions
+    assert len(cur.executados) == 4
+    assert plano["dependencias_de_results"][0]["modelada"] is True
+    assert plano["results_com_referencia_externa"] == 0
 
     sessao = plano["sessions"][0]
     assert sessao["session_id"] == 2686
@@ -350,14 +441,32 @@ def test_build_plan_le_tres_vezes_e_so_seleciona():
 
 
 def test_build_plan_sem_resultados_devolve_plano_vazio():
-    plano = build_plan(CursorFalso([[], [], []]))
+    plano = build_plan(CursorFalso([[("result_drivers", "result_id", "c")], [], [], []]))
     assert plano["sessions"] == []
     assert plano["resumo"]["results_removiveis"] == 0
+
+
+def test_build_plan_bloqueia_quando_outra_tabela_aponta():
+    """Uma chave nao modelada passa a bloquear os ids que ela segura."""
+    cur = CursorFalso([
+        [("result_drivers", "result_id", "c"), ("stints", "result_id", "a")],
+        [(20,)],                                   # stints aponta para o 20
+        [linha_do_banco(1, 10, "4"), linha_do_banco(1, 20, "4")],
+        [],
+        [(1, "Race", "IMSA", "2016", "E", None)],
+    ])
+    plano = build_plan(cur)
+    assert plano["results_com_referencia_externa"] == 1
+    sessao = plano["sessions"][0]
+    assert sessao["ids_removiveis"] == []
+    assert sessao["bloqueios"][0]["motivo"] == EXTERNAL_REFERENCE
+    assert plano["resumo"]["grupos_bloqueados_por_referencia"] == 1
 
 
 def test_build_plan_repetido_da_o_mesmo_digest():
     def executa():
         return build_plan(CursorFalso([
+            [("result_drivers", "result_id", "c")],
             [linha_do_banco(1, 10, "4"), linha_do_banco(1, 20, "4"),
              linha_do_banco(2, 30, "9")],
             [(10, 1, 5)],

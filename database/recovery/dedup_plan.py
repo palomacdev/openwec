@@ -24,14 +24,32 @@ A session whose multiplicities disagree is blocked whole. The one in the
 corpus is 2721, where 39 signatures repeat between 38 and 394 times: that is
 a lap log in the shape of a classification, not a multiplied one.
 
-## What blocks a group
+## Which copy stays
 
-`result_drivers` has `ON DELETE CASCADE` on `results`. Removing a copy takes
-its driver links with it, so a copy may only go when its links are already
-on the row that stays. Measured: 1.238 groups fail that, and the reason is
-always the same — the copies point at driver rows that differ only in case,
-`Tom Kimber-smith` and `Tom Kimber-Smith`. Deciding those are one person is
-not this module's to make, so the group stays.
+`result_drivers` has `ON DELETE CASCADE` on `results`, so removing a copy
+takes its driver links with it. The row that stays is therefore the one that
+**already** carries every link any copy of that signature carries — the
+union, held by one row, with no link created, moved or merged. Ties go to
+the lowest id, which is what makes the plan reproducible.
+
+When no copy holds the union, the group stays whole. The reason in this
+corpus is always the same: the copies point at driver rows that differ only
+in case, `Tom Kimber-smith` and `Tom Kimber-Smith`, and neither row holds
+both. Deciding those are one person is not this module's to make.
+
+Measured, the union rule changes nothing here: of 26.253 groups, 25.015 hold
+the union on the lowest id already, 1.238 hold it nowhere, and none hold it
+on a later id. Every one of the 1.238 diverges by **substituting** a driver
+row rather than by adding one, which is why no copy is ever the superset.
+The rule is still the right one — it is what makes the choice safe rather
+than lucky — and it is what will handle an additive case when one appears.
+
+## Anything else that points at a result
+
+The foreign keys onto `results.id` are read from the catalogue rather than
+assumed. `result_drivers` is the one this module models; a removal candidate
+reached by any other is blocked until that dependency is understood. Today
+the catalogue reports no other, and the plan says which keys it checked.
 
 ## The file is corroboration, not the licence
 
@@ -74,13 +92,17 @@ SEPARATOR = "\x1e"
 NO_DUPLICATION = "SEM_DUPLICACAO"
 FACTOR_NOT_UNIFORM = "FATOR_NAO_UNIFORME"
 DIVERGENT_LINKS = "VINCULOS_DIVERGENTES"
+EXTERNAL_REFERENCE = "REFERENCIA_EXTERNA"
 
 BLOCK_MEANING = {
     FACTOR_NOT_UNIFORM: ("as assinaturas da sessao nao repetem todas o mesmo "
                          "numero de vezes; nao e uma carga multiplicada"),
-    DIVERGENT_LINKS: ("uma copia removivel carrega vinculo de piloto que a "
-                      "copia preservada nao tem; remove-la apagaria o vinculo "
-                      "por ON DELETE CASCADE"),
+    DIVERGENT_LINKS: ("nenhuma copia do grupo carrega todos os vinculos de "
+                      "piloto das demais; preservar qualquer uma apagaria "
+                      "vinculo por ON DELETE CASCADE"),
+    EXTERNAL_REFERENCE: ("uma copia removivel e apontada por outra tabela "
+                         "alem de result_drivers; bloqueado ate a dependencia "
+                         "ser compreendida"),
 }
 
 # The columns of one result row, in the order `result_signature` reads them.
@@ -170,8 +192,27 @@ def uniform_factor(grupos: dict[str, list[int]]) -> int | None:
 
 # ── The plan for one session ─────────────────────────────────
 
+def choose_preserved(ids: list[int], vinculos: dict[int, set]) -> int | None:
+    """
+    The copy that already carries every link the others carry, or None.
+
+    Nothing is created, moved or merged here: the row that stays must hold
+    the union as it is, otherwise the group is not deduplicable. `ids` is
+    ascending, so the first one that qualifies is the lowest, which is the
+    tie-break and the reason the plan reproduces.
+    """
+    uniao: set = set()
+    for i in ids:
+        uniao |= set(vinculos.get(i, ()))
+    for i in ids:
+        if set(vinculos.get(i, ())) >= uniao:
+            return i
+    return None
+
+
 def plan_session(meta: dict, grupos: dict[str, list[int]],
-                 vinculos: dict[int, set], corroboracao: dict | None = None) -> dict:
+                 vinculos: dict[int, set], corroboracao: dict | None = None,
+                 outras_referencias: dict[int, list[str]] | None = None) -> dict:
     """
     What may be removed from one session, and what may not.
 
@@ -233,28 +274,40 @@ def plan_session(meta: dict, grupos: dict[str, list[int]],
             len(vinculos.get(i, ())) for i in entrada["ids_preservados"])
         return entrada
 
+    referencias = outras_referencias or {}
     preservados, removiveis = [], []
     for assinatura in sorted(grupos):
         ids = grupos[assinatura]
-        mantido, resto = ids[0], ids[1:]
-        do_mantido = vinculos.get(mantido, frozenset())
-        divergentes = [i for i in resto
-                       if not vinculos.get(i, frozenset()) <= do_mantido]
-        if divergentes:
+        mantido = choose_preserved(ids, vinculos)
+        if mantido is None:
             entrada["bloqueios"].append({
                 "motivo": DIVERGENT_LINKS,
                 "detalhe": BLOCK_MEANING[DIVERGENT_LINKS],
                 "assinatura_sha256": digest([assinatura]),
                 "ids": ids,
-                "id_preservado": mantido,
-                "ids_divergentes": divergentes,
-                "vinculos_preservados": sorted(do_mantido),
-                "vinculos_ausentes": sorted(
-                    {v for i in divergentes for v in vinculos.get(i, ())}
-                    - set(do_mantido)),
+                "uniao_dos_vinculos": sorted(
+                    {v for i in ids for v in vinculos.get(i, ())}),
+                "vinculos_por_id": {str(i): sorted(vinculos.get(i, ()))
+                                    for i in ids},
             })
             preservados.extend(ids)
             continue
+
+        resto = [i for i in ids if i != mantido]
+        presos = {i: referencias[i] for i in resto if i in referencias}
+        if presos:
+            entrada["bloqueios"].append({
+                "motivo": EXTERNAL_REFERENCE,
+                "detalhe": BLOCK_MEANING[EXTERNAL_REFERENCE],
+                "assinatura_sha256": digest([assinatura]),
+                "ids": ids,
+                "id_preservado": mantido,
+                "referencias": {str(i): sorted(tabelas)
+                                for i, tabelas in sorted(presos.items())},
+            })
+            preservados.extend(ids)
+            continue
+
         preservados.append(mantido)
         removiveis.extend(resto)
 
@@ -283,10 +336,17 @@ def summarise(sessoes: list[dict]) -> dict:
             1 for s in sessoes if s["fator"] is None),
         "sessoes_parcialmente_removiveis": sum(
             1 for s in sessoes if s["ids_removiveis"] and any(
-                b["motivo"] == DIVERGENT_LINKS for b in s["bloqueios"])),
+                b["motivo"] in (DIVERGENT_LINKS, EXTERNAL_REFERENCE)
+                for b in s["bloqueios"])),
         "grupos_bloqueados": sum(
             1 for s in sessoes for b in s["bloqueios"]
+            if b["motivo"] in (DIVERGENT_LINKS, EXTERNAL_REFERENCE)),
+        "grupos_bloqueados_por_vinculo": sum(
+            1 for s in sessoes for b in s["bloqueios"]
             if b["motivo"] == DIVERGENT_LINKS),
+        "grupos_bloqueados_por_referencia": sum(
+            1 for s in sessoes for b in s["bloqueios"]
+            if b["motivo"] == EXTERNAL_REFERENCE),
         "results_atuais": sum(s["total_atual"] for s in sessoes),
         "results_preservados": sum(len(s["ids_preservados"]) for s in sessoes),
         "results_removiveis": sum(len(s["ids_removiveis"]) for s in sessoes),
@@ -524,6 +584,54 @@ WHERE sr.key = %s
 """
 
 
+FOREIGN_KEYS_SQL = """
+SELECT src.relname, att.attname, con.confdeltype
+FROM pg_constraint con
+JOIN pg_class src ON src.oid = con.conrelid
+JOIN pg_class tgt ON tgt.oid = con.confrelid
+JOIN unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord) ON true
+JOIN pg_attribute att ON att.attrelid = src.oid AND att.attnum = k.attnum
+WHERE con.contype = 'f' AND tgt.relname = 'results'
+ORDER BY 1, 2
+"""
+
+DELETE_ACTION = {"a": "NO ACTION", "r": "RESTRICT", "c": "CASCADE",
+                 "n": "SET NULL", "d": "SET DEFAULT"}
+
+# The one this module models. Everything else that points at a result is a
+# dependency nobody has reasoned about, and blocks.
+MODELLED_REFERENCE = ("result_drivers", "result_id")
+
+
+def read_foreign_keys(cur) -> list[dict]:
+    """Every foreign key onto `results`, as the catalogue reports it."""
+    cur.execute(FOREIGN_KEYS_SQL)
+    return [{"tabela": tabela, "coluna": coluna,
+             "on_delete": DELETE_ACTION.get(acao, acao),
+             "modelada": (tabela, coluna) == MODELLED_REFERENCE}
+            for tabela, coluna, acao in cur.fetchall()]
+
+
+def read_other_references(cur, chaves: list[dict]) -> dict[int, list[str]]:
+    """
+    {result_id: [tables that point at it]} for every key but the modelled one.
+
+    Empty today, and read rather than assumed: a table added later starts
+    blocking the ids it holds instead of being silently deduplicated around.
+    """
+    achados: dict[int, list[str]] = {}
+    for chave in chaves:
+        if chave["modelada"]:
+            continue
+        cur.execute(
+            f'SELECT DISTINCT "{chave["coluna"]}" FROM "{chave["tabela"]}" '
+            f'WHERE "{chave["coluna"]}" IS NOT NULL')
+        for (result_id,) in cur.fetchall():
+            achados.setdefault(result_id, []).append(
+                f'{chave["tabela"]}.{chave["coluna"]}')
+    return achados
+
+
 def read_corpus(cur, series: str = "IMSA") -> tuple[dict, dict, dict]:
     """The three reads, in full. Returns (grupos_por_sessao, vinculos, meta)."""
     cur.execute(RESULTS_SQL, (series,))
@@ -548,10 +656,13 @@ def read_corpus(cur, series: str = "IMSA") -> tuple[dict, dict, dict]:
 
 
 def build_plan(cur, series: str = "IMSA", indice: dict | None = None) -> dict:
+    chaves = read_foreign_keys(cur)
+    referencias = read_other_references(cur, chaves)
     grupos, vinculos, meta = read_corpus(cur, series)
     sessoes = [
         plan_session(meta.get(sid, {"session_id": sid}), grupos[sid], vinculos,
-                     corroboration(grupos[sid], indice) if indice else None)
+                     corroboration(grupos[sid], indice) if indice else None,
+                     referencias)
         for sid in sorted(grupos)
     ]
     return {
@@ -560,6 +671,8 @@ def build_plan(cur, series: str = "IMSA", indice: dict | None = None) -> dict:
         "revisao_historica": HISTORICAL_REVISION,
         "campos_da_assinatura": list(SIGNATURE_FIELDS),
         "motivos": BLOCK_MEANING,
+        "dependencias_de_results": chaves,
+        "results_com_referencia_externa": len(referencias),
         "corroboracao_por_arquivo": bool(indice),
         "resumo": summarise(sessoes),
         "plan_digest": plan_digest(sessoes),
@@ -623,7 +736,13 @@ def main() -> int:
     print(f"  result_drivers que caem junto: {r['result_drivers_removidos']}")
     print(f"  sessoes sem duplicacao (fator 1): {r['sessoes_sem_duplicacao']}")
     print(f"  sessoes bloqueadas inteiras:     {r['sessoes_bloqueadas_inteiras']}")
-    print(f"  grupos bloqueados:               {r['grupos_bloqueados']}")
+    print(f"  grupos bloqueados:               {r['grupos_bloqueados']}"
+          f"  (vinculo {r['grupos_bloqueados_por_vinculo']}, "
+          f"referencia {r['grupos_bloqueados_por_referencia']})")
+    print(f"  chaves que apontam para results: "
+          + ", ".join(f"{c['tabela']}.{c['coluna']} {c['on_delete']}"
+                      f"{'' if c['modelada'] else ' NAO MODELADA'}"
+                      for c in plano["dependencias_de_results"]))
     print(f"  sessoes parcialmente removiveis: {r['sessoes_parcialmente_removiveis']}")
     print(f"  corroboradas por arquivo:        {r['sessoes_corroboradas_por_arquivo']}")
     print(f"  plan_digest: {plano['plan_digest']}")
