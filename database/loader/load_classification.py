@@ -727,8 +727,6 @@ INGEST_STATUS = {
                                         "outro campeonato"),
 }
 
-ROLLED_BACK = "carga desfeita junto com a falha de outro arquivo do mesmo lote"
-
 # ingested_at is set here, not left to the column default: the default only
 # fires on INSERT, and a reingestion that took the UPDATE branch would keep
 # claiming the time of the first run.
@@ -756,21 +754,6 @@ def record_ingestions(cur, registros) -> None:
     """
     for registro in registros:
         cur.execute(INGEST_UPSERT, registro)
-
-
-def discarded_by_rollback(pendentes):
-    """
-    What a batch's records become once its transaction is rolled back.
-
-    A session that had loaded rows no longer has them, and a record still
-    saying `success` would claim rows that are not in the table. A session
-    that loaded nothing is unchanged by the rollback and keeps its record.
-    """
-    for series_key, source_url, status, rows_loaded, message in pendentes:
-        if status == "success":
-            yield (series_key, source_url, "skipped", 0, ROLLED_BACK)
-        else:
-            yield (series_key, source_url, status, rows_loaded, message)
 
 
 def insert_result(cur, session_id: int, car_id: int, row: dict,
@@ -1034,16 +1017,12 @@ def run(series_filter: str | None = None, dry_run: bool = False):
     # an earlier one must not answer with what it folded then.
     forget_driver_index(cur)
 
+    # `rows` is what the files held, `loaded` is what reached the table. They
+    # are not the same number — a row with no NUMBER is dropped — and the run
+    # used to report only the first, which reads as a count of what was saved.
     total = {"sessions": 0, "ok": 0, "no_match": 0, "ambiguous": 0,
              "contradicted": 0, "empty": 0, "errors": 0, "rows": 0,
-             "ambiguous_drivers": 0}
-
-    # Records of files whose rows are loaded but not yet committed. They are
-    # written inside the transaction they describe, immediately before its
-    # commit, so a record never outlives the rows it claims: if the commit
-    # fails, neither the rows nor the record exist. The list crosses the
-    # series loop because the commit cadence below does too.
-    pendentes: list[tuple] = []
+             "loaded": 0, "ambiguous_drivers": 0}
 
     series_to_run = RAW_DIRS
     if series_filter:
@@ -1064,40 +1043,16 @@ def run(series_filter: str | None = None, dry_run: bool = False):
                 result = process_session(cur, series_key, sess, dry_run)
                 status = result["status"]
 
-                if status in ("ok", "ok_dry"):
-                    series_stats["ok"] += 1
-                    total["ok"] += 1
-                    total["rows"] += result.get("rows", 0)
-                    total["ambiguous_drivers"] += result.get("ambiguous_drivers", 0)
-                elif status == "no_session_match":
-                    series_stats["no_match"] += 1
-                    total["no_match"] += 1
-                    print(f"  [NO MATCH] {sess['season_raw']} / {sess['event_raw']} / {sess['session_name']}")
-                elif status == "ambiguous_session":
-                    series_stats["ambiguous"] += 1
-                    total["ambiguous"] += 1
-                    print(f"  [AMBIGUOUS SESSION] {sess['season_raw']} / {sess['event_raw']} / {sess['session_name']}")
-                elif status == "contradicted_session":
-                    series_stats["contradicted"] += 1
-                    total["contradicted"] += 1
-                    print(f"  [CONTRADICTED SESSION] {sess['season_raw']} / {sess['event_raw']} / {sess['session_name']}"
-                          f" — the only session of this name belongs to another championship")
-                elif status == "empty":
-                    series_stats["empty"] += 1
-                    total["empty"] += 1
-
                 if not dry_run:
                     registro = INGEST_STATUS.get(status)
                     if registro:
                         situacao, motivo = registro
-                        pendentes.append((series_key, fonte, situacao,
-                                          result.get("loaded", 0), motivo))
-
-                if not dry_run and status == "ok" and total["ok"] % 50 == 0:
-                    record_ingestions(cur, pendentes)
-                    pendentes.clear()
+                        record_ingestions(cur, [(series_key, fonte, situacao,
+                                                 result.get("loaded", 0), motivo)])
+                    # The session is the unit of work. Its rows and the record
+                    # of them land together or not at all, and a failure in the
+                    # next one cannot reach back to either.
                     conn.commit()
-                    print(f"  [{series_key}] {total['ok']} sessions loaded...")
 
             except Exception as e:
                 series_stats["errors"] += 1
@@ -1105,29 +1060,63 @@ def run(series_filter: str | None = None, dry_run: bool = False):
                 print(f"  [ERROR] {sess['season_raw']}/{sess['event_raw']}/{sess['session_name']}: {e}")
                 import traceback; traceback.print_exc()
 
-                # The rollback is what keeps a half-read file out of the
-                # table, and it takes the whole open batch with it. The
-                # records are written after it, in a transaction of their
-                # own, which is the only way the failure survives.
+                # The rollback is what keeps a half-read file out of the table.
+                # The record is written after it, in a transaction of its own,
+                # which is the only way the failure survives.
                 conn.rollback()
+                # Drivers written by the rolled-back session are still in the
+                # fold this connection keeps in memory, pointing at ids that no
+                # longer exist. The next session reads the table again.
+                forget_driver_index(cur)
                 if not dry_run:
-                    desfeitas = list(discarded_by_rollback(pendentes))
-                    pendentes.clear()
-                    record_ingestions(cur, desfeitas)
-                    record_ingestions(
-                        cur, [(series_key, fonte, "error", 0, str(e))])
-                    conn.commit()
+                    try:
+                        record_ingestions(
+                            cur, [(series_key, fonte, "error", 0, str(e))])
+                        conn.commit()
+                    except Exception as falha_do_log:   # noqa: BLE001
+                        # Recording a failure must not become one. Whatever
+                        # state this left the connection in, the next session
+                        # starts from a clean transaction.
+                        conn.rollback()
+                        print(f"  [ERROR] o registro da falha nao pode ser "
+                              f"gravado: {falha_do_log}")
+                continue
+
+            # Counted after the commit, so the summary says what is in the
+            # table rather than what was attempted.
+            if status in ("ok", "ok_dry"):
+                series_stats["ok"] += 1
+                total["ok"] += 1
+                total["rows"] += result.get("rows", 0)
+                total["loaded"] += result.get("loaded", 0)
+                total["ambiguous_drivers"] += result.get("ambiguous_drivers", 0)
+            elif status == "no_session_match":
+                series_stats["no_match"] += 1
+                total["no_match"] += 1
+                print(f"  [NO MATCH] {sess['season_raw']} / {sess['event_raw']} / {sess['session_name']}")
+            elif status == "ambiguous_session":
+                series_stats["ambiguous"] += 1
+                total["ambiguous"] += 1
+                print(f"  [AMBIGUOUS SESSION] {sess['season_raw']} / {sess['event_raw']} / {sess['session_name']}")
+            elif status == "contradicted_session":
+                series_stats["contradicted"] += 1
+                total["contradicted"] += 1
+                print(f"  [CONTRADICTED SESSION] {sess['season_raw']} / {sess['event_raw']} / {sess['session_name']}"
+                      f" — the only session of this name belongs to another championship")
+            elif status == "empty":
+                series_stats["empty"] += 1
+                total["empty"] += 1
+
+            if not dry_run and total["ok"] and total["ok"] % 50 == 0:
+                print(f"  [{series_key}] {total['ok']} sessions loaded...")
 
         print(f"  ✓ {series_stats['ok']}  no_match: {series_stats['no_match']}"
               f"  ambiguous: {series_stats['ambiguous']}"
               f"  contradicted: {series_stats['contradicted']}"
               f"  empty: {series_stats['empty']}  errors: {series_stats['errors']}")
 
-    if not dry_run:
-        record_ingestions(cur, pendentes)
-        pendentes.clear()
-        conn.commit()
-
+    # No final commit: every session committed its own transaction, and a
+    # second one here would only hide a write that escaped the loop.
     cur.close()
     conn.close()
 
@@ -1138,7 +1127,8 @@ def run(series_filter: str | None = None, dry_run: bool = False):
     print(f"  No DB match:        {total['no_match']}")
     print(f"  Empty files:        {total['empty']}")
     print(f"  Errors:             {total['errors']}")
-    print(f"  Total rows:         {total['rows']}")
+    print(f"  Rows in the files:  {total['rows']}")
+    print(f"  Rows persisted:     {total['loaded']}")
 
 
 if __name__ == "__main__":
