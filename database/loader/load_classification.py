@@ -9,17 +9,32 @@ Strategy:
   - Upserts teams and drivers (idempotent)
   - Inserts cars, results and result_drivers
 
-KNOWN DEFECT - cars are NOT upserted idempotently.
-  upsert_car issues ON CONFLICT DO NOTHING with no conflict target against a
-  table that has no unique constraint, so the insert always succeeds and always
-  mints a new car_id. results then gets a fresh row per run, because its
-  UNIQUE (session_id, car_id) is keyed on the id that just changed. Re-running
-  this loader multiplies the classification: a session loaded three times
-  serves every position three times.
+Cars are upserted by identity since #39 (65bdd0e). What follows describes
+the current behaviour; `upsert_car` holds the detail.
 
-  Until the competitive-entry model (migration 006) is wired up, writes are
-  blocked. Set OPENWEC_ALLOW_DUPLICATING_LOADER=1 to override and accept the
-  duplication. --dry-run is always allowed.
+  The defect this replaced: the insert carried ON CONFLICT DO NOTHING with no
+  conflict target against a table with no unique constraint, so no conflict
+  was ever possible, every run minted a new car_id, and `results` got a fresh
+  row with it, because its UNIQUE (session_id, car_id) is keyed on the id that
+  had just changed. A session loaded three times served every position three
+  times. 668.273 rows in `cars` over 4.411 distinct identities are what that
+  left behind.
+
+  What runs now: the identity is looked up before inserting, over the eight
+  columns of CAR_COLUMNS, with NULL treated as a value rather than as unknown,
+  and under a transaction-scoped advisory lock keyed on the identity itself.
+  Re-loading the same file resolves to the same car and updates its result in
+  place instead of adding one.
+
+  Writes stay blocked all the same. The block is not about `upsert_car` any
+  more: it is about what `cars` cannot answer. `cars` has no temporal scope,
+  so one row is "number + team + class" for all time, and the eight attributes
+  cannot tell one season's entry from another's. ADR 0001 and
+  docs/competitive-entry-model.md record the measurements that rule out every
+  candidate key over this table; `entries` (migration 006) is where the
+  identity belongs, and nothing points at it yet. Set
+  OPENWEC_ALLOW_DUPLICATING_LOADER=1 to write anyway. --dry-run is always
+  allowed.
 
 Usage:
     python database/loader/load_classification.py
@@ -591,6 +606,28 @@ _CAR_INSERT = (
 
 
 def upsert_car(cur, number: str, team_id: int, row: dict, series_key: str) -> int | None:
+    """
+    The car this row is about: the one already stored, or a new one.
+
+    Identity is the eight columns of CAR_COLUMNS and nothing else.
+    `manufacturer` and `tyre_supplier` are deliberately outside it: they are
+    complementary metadata that a source states or omits, never contradicts,
+    so a row that carries one and a row that does not are the same car.
+
+    NULL is a value here, not an unknown. Six of the eight columns are
+    nullable and most are empty in the corpus — `car_group` in 645.524 rows of
+    668.273 — so comparing with `=` would make every one of those rows fail to
+    match itself and mint a duplicate. `IS NOT DISTINCT FROM` is the same
+    NULLS NOT DISTINCT semantics the competitive-entry model uses, for the
+    same reason.
+
+    The lookup and the insert are serialised per identity, not per table: the
+    advisory lock below is keyed on the attributes, so two ingestions of
+    different cars never wait on each other, and two ingestions of the same
+    car cannot both find nothing and both insert.
+
+    Returns the id, or None if the insert produced no row.
+    """
     attrs = car_identity(number, team_id, row)
 
     # Two ingestions of the same identity would otherwise both find nothing and
@@ -982,10 +1019,16 @@ def _writes_are_blocked() -> bool:
     """
     Guard for the window between knowing about the duplication and fixing it.
 
-    Blocking is the conservative choice. Repairing idempotency means picking an
-    identity rule, and every candidate either merges entries the source proves
-    are different or splits entries it only spells differently. That decision
-    does not belong in an additive change.
+    `upsert_car` is idempotent since #39, and the block still stands, because
+    idempotency and identity are not the same thing. The loader can now avoid
+    minting a second row for what it recognises as the same car; what it still
+    cannot do is tell one season's entry from another's, since `cars` carries
+    no temporal scope and the eight attributes carry no competition.
+
+    Blocking is the conservative choice. Every candidate key measured over
+    this table either merges entries the source proves are different or splits
+    entries it only spells differently — see ADR 0001. That decision belongs
+    to the competitive-entry model, not to this loader.
     """
     return os.environ.get(OVERRIDE_ENV, "").strip() not in {"1", "true", "TRUE", "yes"}
 
@@ -993,14 +1036,17 @@ def _writes_are_blocked() -> bool:
 def run(series_filter: str | None = None, dry_run: bool = False):
     if not dry_run and _writes_are_blocked():
         print("=" * 60)
-        print("BLOCKED - this loader duplicates classification data on every run.")
+        print("BLOCKED - classification identity is not settled for this table.")
         print("")
-        print("  upsert_car cannot find an existing car, so each run creates new")
-        print("  car and result rows. A session loaded N times serves every")
-        print("  position N times.")
+        print("  upsert_car resolves a car by its eight attributes and no longer")
+        print("  duplicates on re-ingestion. What `cars` still cannot express is")
+        print("  WHICH entry a row is: it has no season and no competition, so the")
+        print("  same number and team in two seasons is one identity.")
+        print("")
+        print("  See ADR 0001 and docs/competitive-entry-model.md.")
         print("")
         print("  Use --dry-run to inspect without writing, or set")
-        print(f"  {OVERRIDE_ENV}=1 to override and accept the duplication.")
+        print(f"  {OVERRIDE_ENV}=1 to write anyway.")
         print("=" * 60)
         raise SystemExit(2)
 
