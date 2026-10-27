@@ -13,8 +13,10 @@ second session with no duplication at all.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -165,14 +167,58 @@ def mundo(schema):
     return dados
 
 
-def executar(schema, plano, aplicar=False, backup_dir=None):
+def atestar_dump(destino: Path, schema, *, idade_horas: float = 0.0,
+                 contagens: dict | None = None) -> Path:
+    """
+    Um dump e a evidencia que `backup_attestation` exige dele.
+
+    A restauracao e verificada noutro cluster, e aqui so existe um, entao o
+    bloco `restauracao` e montado com o mesmo formato que `record_restore`
+    grava. O que esta sob teste e o portao do executor, nao a atestacao, que
+    tem suas proprias suites.
+    """
+    from database.recovery import backup_attestation as att
+
+    destino.mkdir(parents=True, exist_ok=True)
+    dump = destino / "cluster.dump"
+    dump.write_bytes(b"PGDMP-conteudo-de-teste")
+
+    agora = datetime.now(timezone.utc) - timedelta(hours=idade_horas)
+    conn = connect(schema, autocommit=True)
+    try:
+        with conn.cursor() as cur:
+            prova = att.capture(cur, dump, 1, agora=agora)
+    finally:
+        conn.close()
+
+    if contagens:
+        prova["contagens"].update(contagens)
+    prova["restauracao"] = {
+        "ok": True,
+        "cluster_de_destino": prova["cluster_de_origem"] + "9",
+        "verificada_em": agora.isoformat(timespec="seconds"),
+        "contagens": dict(prova["contagens"]),
+        "divergencias": {},
+    }
+    att.attestation_path(dump).write_text(
+        json.dumps(prova, ensure_ascii=False), encoding="utf-8")
+    return dump
+
+
+def executar(schema, plano, aplicar=False, backup_dir=None, dump=None,
+             max_age_hours=6):
     conn = connect(schema)
     try:
-        return run_plan(conn, plano, backup_dir, aplicar)
+        return run_plan(conn, plano, backup_dir, aplicar, dump, max_age_hours)
     finally:
         if not conn.closed:
             conn.rollback()
             conn.close()
+
+
+@pytest.fixture
+def dump_valido(mundo, tmp_path):
+    return atestar_dump(tmp_path / "cluster", mundo["schema"])
 
 
 # ── O plano que a semente produz ─────────────────────────────
@@ -199,6 +245,7 @@ def test_dry_run_nao_altera_nada(mundo):
     assert relatorio["results_removiveis"] == 4
     assert relatorio["results_preservados"] == 7
     assert relatorio["divergencias"] == []
+    assert relatorio["escritores_concorrentes"] == []
     assert contagens(mundo["schema"]) == antes
 
 
@@ -209,9 +256,9 @@ def test_dry_run_nao_exige_backup(mundo):
 
 # ── 2. Execucao ──────────────────────────────────────────────
 
-def test_execucao_remove_exatamente_o_plano(mundo, tmp_path):
+def test_execucao_remove_exatamente_o_plano(mundo, dump_valido, tmp_path):
     results_antes, vinculos_antes = contagens(mundo["schema"])
-    relatorio = executar(mundo["schema"], mundo["plano"], True, tmp_path)
+    relatorio = executar(mundo["schema"], mundo["plano"], True, tmp_path, dump_valido)
 
     assert relatorio["aplicado"] is True
     assert relatorio["results_removidos"] == 4
@@ -237,8 +284,8 @@ def test_execucao_remove_exatamente_o_plano(mundo, tmp_path):
         conn.close()
 
 
-def test_a_sessao_intacta_continua_intacta(mundo, tmp_path):
-    executar(mundo["schema"], mundo["plano"], True, tmp_path)
+def test_a_sessao_intacta_continua_intacta(mundo, dump_valido, tmp_path):
+    executar(mundo["schema"], mundo["plano"], True, tmp_path, dump_valido)
     conn = connect(mundo["schema"], autocommit=True)
     try:
         with conn.cursor() as cur:
@@ -251,9 +298,9 @@ def test_a_sessao_intacta_continua_intacta(mundo, tmp_path):
 
 # ── 8. Grupos bloqueados ─────────────────────────────────────
 
-def test_o_grupo_bloqueado_sobrevive_inteiro(mundo, tmp_path):
+def test_o_grupo_bloqueado_sobrevive_inteiro(mundo, dump_valido, tmp_path):
     bloqueados = mundo["triplicada"]["54"]
-    executar(mundo["schema"], mundo["plano"], True, tmp_path)
+    executar(mundo["schema"], mundo["plano"], True, tmp_path, dump_valido)
 
     conn = connect(mundo["schema"], autocommit=True)
     try:
@@ -274,7 +321,7 @@ def test_o_grupo_bloqueado_sobrevive_inteiro(mundo, tmp_path):
 
 # ── 3. Plano obsoleto ────────────────────────────────────────
 
-def test_plano_obsoleto_e_recusado(mundo, tmp_path):
+def test_plano_obsoleto_e_recusado(mundo, dump_valido, tmp_path):
     """Uma linha a mais na sessao e o plano ja nao descreve este banco."""
     conn = connect(mundo["schema"], autocommit=True)
     try:
@@ -289,14 +336,14 @@ def test_plano_obsoleto_e_recusado(mundo, tmp_path):
         conn.close()
 
     with pytest.raises(ExecutionRefused) as erro:
-        executar(mundo["schema"], mundo["plano"], True, tmp_path)
+        executar(mundo["schema"], mundo["plano"], True, tmp_path, dump_valido)
     assert any("plan_digest" in m for m in erro.value.motivos)
     assert contagens(mundo["schema"])[0] == 12
 
 
 # ── 4. Divergencia de vinculos ───────────────────────────────
 
-def test_vinculo_alterado_depois_do_plano_e_recusado(mundo, tmp_path):
+def test_vinculo_alterado_depois_do_plano_e_recusado(mundo, dump_valido, tmp_path):
     """
     O conteudo das linhas nao muda, as contagens nao mudam, e os ids sao os
     mesmos. So o vinculo mudou — e e por isso que ele entra na comparacao.
@@ -312,7 +359,7 @@ def test_vinculo_alterado_depois_do_plano_e_recusado(mundo, tmp_path):
         conn.close()
 
     with pytest.raises(ExecutionRefused) as erro:
-        executar(mundo["schema"], mundo["plano"], True, tmp_path)
+        executar(mundo["schema"], mundo["plano"], True, tmp_path, dump_valido)
     assert any("vinculos_sha256" in m or "plan_digest" in m
                for m in erro.value.motivos)
     assert contagens(mundo["schema"])[0] == 11
@@ -320,7 +367,7 @@ def test_vinculo_alterado_depois_do_plano_e_recusado(mundo, tmp_path):
 
 # ── 5. Dependencia nova ──────────────────────────────────────
 
-def test_chave_estrangeira_nova_e_recusada(mundo, tmp_path):
+def test_chave_estrangeira_nova_e_recusada(mundo, dump_valido, tmp_path):
     conn = connect(mundo["schema"], autocommit=True)
     try:
         with conn.cursor() as cur:
@@ -329,7 +376,7 @@ def test_chave_estrangeira_nova_e_recusada(mundo, tmp_path):
             cur.execute("INSERT INTO stints (result_id) VALUES (%s)",
                         (mundo["triplicada"]["4"][1],))
         with pytest.raises(ExecutionRefused) as erro:
-            executar(mundo["schema"], mundo["plano"], True, tmp_path)
+            executar(mundo["schema"], mundo["plano"], True, tmp_path, dump_valido)
         assert any("nao modelada" in m or "chaves sobre results mudaram" in m
                    for m in erro.value.motivos)
         assert contagens(mundo["schema"])[0] == 11
@@ -341,7 +388,7 @@ def test_chave_estrangeira_nova_e_recusada(mundo, tmp_path):
 
 # ── 6. Falha durante a exclusao ──────────────────────────────
 
-def test_falha_depois_do_delete_desfaz_tudo(mundo, tmp_path, monkeypatch):
+def test_falha_depois_do_delete_desfaz_tudo(mundo, dump_valido, tmp_path, monkeypatch):
     """
     O DELETE acontece, a verificacao falha, e nada sobra dele.
 
@@ -353,12 +400,12 @@ def test_falha_depois_do_delete_desfaz_tudo(mundo, tmp_path, monkeypatch):
 
     antes = contagens(mundo["schema"])
     with pytest.raises(ExecutionRefused) as erro:
-        executar(mundo["schema"], mundo["plano"], True, tmp_path)
+        executar(mundo["schema"], mundo["plano"], True, tmp_path, dump_valido)
     assert "falha simulada depois do delete" in erro.value.motivos
     assert contagens(mundo["schema"]) == antes
 
 
-def test_excecao_inesperada_tambem_desfaz(mundo, tmp_path, monkeypatch):
+def test_excecao_inesperada_tambem_desfaz(mundo, dump_valido, tmp_path, monkeypatch):
     import database.recovery.dedup_execute as executor
     chamadas = {"n": 0}
     original = executor.snapshot
@@ -372,26 +419,26 @@ def test_excecao_inesperada_tambem_desfaz(mundo, tmp_path, monkeypatch):
     monkeypatch.setattr(executor, "snapshot", quebra)
     antes = contagens(mundo["schema"])
     with pytest.raises(RuntimeError):
-        executar(mundo["schema"], mundo["plano"], True, tmp_path)
+        executar(mundo["schema"], mundo["plano"], True, tmp_path, dump_valido)
     assert contagens(mundo["schema"]) == antes
 
 
 # ── 7. Segunda execucao ──────────────────────────────────────
 
-def test_a_segunda_execucao_do_mesmo_plano_e_recusada(mundo, tmp_path):
-    executar(mundo["schema"], mundo["plano"], True, tmp_path)
+def test_a_segunda_execucao_do_mesmo_plano_e_recusada(mundo, dump_valido, tmp_path):
+    executar(mundo["schema"], mundo["plano"], True, tmp_path, dump_valido)
     depois = contagens(mundo["schema"])
 
     with pytest.raises(ExecutionRefused) as erro:
-        executar(mundo["schema"], mundo["plano"], True, tmp_path)
+        executar(mundo["schema"], mundo["plano"], True, tmp_path, dump_valido)
     assert erro.value.motivos
     assert contagens(mundo["schema"]) == depois, "a segunda passagem mexeu"
 
 
 # ── 9. Backup ────────────────────────────────────────────────
 
-def test_o_backup_e_conferido_antes_da_exclusao(mundo, tmp_path):
-    relatorio = executar(mundo["schema"], mundo["plano"], True, tmp_path)
+def test_o_backup_e_conferido_antes_da_exclusao(mundo, dump_valido, tmp_path):
+    relatorio = executar(mundo["schema"], mundo["plano"], True, tmp_path, dump_valido)
     backup = relatorio["backup"]
     assert backup["estado"] == "restauracao conferida"
     assert backup["results"] == 4
@@ -400,7 +447,7 @@ def test_o_backup_e_conferido_antes_da_exclusao(mundo, tmp_path):
 
 
 def test_backup_que_nao_reproduz_as_linhas_recusa_antes_de_apagar(
-        mundo, tmp_path, monkeypatch):
+        mundo, dump_valido, tmp_path, monkeypatch):
     """
     O que torna a conferencia uma conferencia: um arquivo que nao reproduz
     as linhas vivas interrompe a execucao, e nada e apagado.
@@ -417,12 +464,12 @@ def test_backup_que_nao_reproduz_as_linhas_recusa_antes_de_apagar(
     monkeypatch.setattr(executor, "backup_payload", adultera)
     antes = contagens(mundo["schema"])
     with pytest.raises(ExecutionRefused) as erro:
-        executar(mundo["schema"], mundo["plano"], True, tmp_path)
+        executar(mundo["schema"], mundo["plano"], True, tmp_path, dump_valido)
     assert any("nao reproduz" in m for m in erro.value.motivos)
     assert contagens(mundo["schema"]) == antes
 
 
-def test_o_backup_restaura_as_linhas_removidas(mundo, tmp_path):
+def test_o_backup_restaura_as_linhas_removidas(mundo, dump_valido, tmp_path):
     """
     A prova de reversibilidade: apagar, repor do arquivo, e as linhas voltam
     identicas as que existiam antes — conferidas pelo mesmo digest.
@@ -437,7 +484,7 @@ def test_o_backup_restaura_as_linhas_removidas(mundo, tmp_path):
     finally:
         conn.close()
 
-    relatorio = executar(mundo["schema"], mundo["plano"], True, tmp_path)
+    relatorio = executar(mundo["schema"], mundo["plano"], True, tmp_path, dump_valido)
     payload = load_plan(Path(relatorio["backup"]["caminho"]))
 
     conn = connect(mundo["schema"], autocommit=True)
@@ -459,6 +506,136 @@ def test_o_backup_restaura_as_linhas_removidas(mundo, tmp_path):
                               "result_id") == antes_v
     finally:
         conn.close()
+
+
+# ── Sobrescrita de backup ────────────────────────────────────
+
+def test_backup_existente_nao_e_sobrescrito(mundo, dump_valido, tmp_path):
+    """
+    O nome carrega o digest do plano, entao um arquivo ja ali pertence a uma
+    tentativa anterior deste mesmo plano — e pode ser a unica copia do que
+    ela levou.
+    """
+    anterior = tmp_path / f"dedup-{mundo['plano']['plan_digest'][:16]}.json"
+    anterior.write_text("backup de uma tentativa anterior", encoding="utf-8")
+    antes = contagens(mundo["schema"])
+
+    with pytest.raises(ExecutionRefused) as erro:
+        executar(mundo["schema"], mundo["plano"], True, tmp_path, dump_valido)
+    assert any("nao sobrescreve backup" in m for m in erro.value.motivos)
+    assert contagens(mundo["schema"]) == antes
+    assert anterior.read_text(encoding="utf-8") ==         "backup de uma tentativa anterior"
+
+
+def test_o_backup_gravado_confere_consigo_mesmo(mundo, dump_valido, tmp_path):
+    relatorio = executar(mundo["schema"], mundo["plano"], True, tmp_path,
+                         dump_valido)
+    backup = relatorio["backup"]
+    bruto = Path(backup["caminho"]).read_bytes()
+    assert hashlib.sha256(bruto).hexdigest() == backup["sha256"]
+    assert backup["bytes"] == len(bruto)
+    assert backup["plan_digest"] == mundo["plano"]["plan_digest"]
+    assert json.loads(bruto)["plan_digest"] == mundo["plano"]["plan_digest"]
+    assert not list(tmp_path.glob("*.parcial")), "sobrou arquivo parcial"
+
+
+# ── Escrita concorrente ──────────────────────────────────────
+
+def test_escritor_concorrente_impede_a_execucao(mundo, dump_valido, tmp_path):
+    """
+    O advisory lock nao alcanca quem nao o usa. Aqui uma transacao comum
+    segura ROW EXCLUSIVE em `results`, e e isso que tem de barrar.
+    """
+    escritor = connect(mundo["schema"])          # autocommit=False
+    try:
+        with escritor.cursor() as cur:
+            cur.execute("INSERT INTO cars (number, team_id, car_class) "
+                        "SELECT '77', team_id, 'PC' FROM cars LIMIT 1 "
+                        "RETURNING id")
+            carro = cur.fetchone()[0]
+            cur.execute("INSERT INTO results (session_id, car_id, status) "
+                        "VALUES (%s, %s, 'Classified')",
+                        (mundo["sessoes"][0], carro))
+        # transacao deliberadamente aberta
+
+        antes = contagens(mundo["schema"])
+        with pytest.raises(ExecutionRefused) as erro:
+            executar(mundo["schema"], mundo["plano"], True, tmp_path,
+                     dump_valido)
+        assert any("escritor ativo" in m for m in erro.value.motivos)
+        assert contagens(mundo["schema"]) == antes
+        assert not list(tmp_path.glob("dedup-*.json")),             "recusou mas gravou backup"
+    finally:
+        escritor.rollback()
+        escritor.close()
+
+
+def test_o_dry_run_aponta_o_escritor_sem_barrar_ninguem(mundo):
+    escritor = connect(mundo["schema"])
+    try:
+        with escritor.cursor() as cur:
+            cur.execute("UPDATE results SET status = 'Classified' "
+                        "WHERE id = %s", (mundo["triplicada"]["4"][0],))
+
+        relatorio = executar(mundo["schema"], mundo["plano"])
+        assert relatorio["aplicado"] is False
+        pids = {e["pid"] for e in relatorio["escritores_concorrentes"]}
+        assert pids, "o dry-run devia ver o escritor"
+        assert "results" in {e["tabela"]
+                             for e in relatorio["escritores_concorrentes"]}
+    finally:
+        escritor.rollback()
+        escritor.close()
+
+
+# ── O dump do cluster ────────────────────────────────────────
+
+def test_sem_dump_a_execucao_e_recusada(mundo, tmp_path):
+    with pytest.raises(ExecutionRefused) as erro:
+        executar(mundo["schema"], mundo["plano"], True, tmp_path, None)
+    assert any("--pg-dump" in m for m in erro.value.motivos)
+    assert contagens(mundo["schema"])[0] == 11
+
+
+def test_dump_sem_atestacao_e_recusado(mundo, tmp_path):
+    solto = tmp_path / "solto.dump"
+    solto.write_bytes(b"um arquivo qualquer")
+    with pytest.raises(ExecutionRefused) as erro:
+        executar(mundo["schema"], mundo["plano"], True, tmp_path, solto)
+    assert any("evidencia" in m for m in erro.value.motivos)
+
+
+def test_dump_velho_e_recusado(mundo, tmp_path):
+    velho = atestar_dump(tmp_path / "velho", mundo["schema"], idade_horas=48)
+    with pytest.raises(ExecutionRefused) as erro:
+        executar(mundo["schema"], mundo["plano"], True, tmp_path, velho,
+                 max_age_hours=6)
+    assert any("acima do limite" in m for m in erro.value.motivos)
+    assert contagens(mundo["schema"])[0] == 11
+
+
+def test_dump_que_nao_e_mais_pre_imagem_e_recusado(mundo, tmp_path):
+    """
+    Mesmo cluster, mesma idade, restauracao verificada — mas tirado quando
+    `results` tinha outra contagem. Nao e um caminho de volta.
+    """
+    desatualizado = atestar_dump(tmp_path / "antigo", mundo["schema"],
+                                 contagens={"results": 999})
+    with pytest.raises(ExecutionRefused) as erro:
+        executar(mundo["schema"], mundo["plano"], True, tmp_path,
+                 desatualizado)
+    assert any("pre-imagem" in m for m in erro.value.motivos)
+    assert contagens(mundo["schema"])[0] == 11
+
+
+def test_o_relatorio_registra_o_dump_usado(mundo, dump_valido, tmp_path):
+    relatorio = executar(mundo["schema"], mundo["plano"], True, tmp_path,
+                         dump_valido)
+    dump = relatorio["dump"]
+    assert dump["caminho"].endswith("cluster.dump")
+    assert dump["restauracao_verificada"] is True
+    assert dump["idade_horas"] < 1
+    assert dump["contagens"]["results"] == 11
 
 
 # ── O plano como arquivo ─────────────────────────────────────

@@ -25,14 +25,40 @@ the run rather than deleting around it.
 A second run of the same plan refuses itself: the rows it names are gone,
 so the rebuilt plan no longer matches.
 
-## The backup is a restore test, not a file
+## Nothing else writes while this runs
 
-`results` rows and their `result_drivers` are written out, read back from
-disk, inserted into temporary tables shaped `LIKE` the real ones, and
-compared against the live rows by a digest computed in the database. The
-deletion only proceeds when the file has demonstrably reproduced the rows.
-Temporary tables are used on purpose: the check leaves no object behind and
-touches nothing in any schema.
+The advisory lock coordinates executors that take it, which an ingestion or
+a `psql` session does not. What stops those is
+`LOCK TABLE results, result_drivers IN SHARE ROW EXCLUSIVE MODE NOWAIT`,
+taken before anything else and held to the end of the transaction. It
+conflicts with the ROW EXCLUSIVE that every INSERT, UPDATE and DELETE takes,
+and not with the ACCESS SHARE that readers take, so the API keeps serving.
+
+NOWAIT rather than waiting: a queued lock request blocks the readers that
+arrive behind it, so waiting for a busy table would take the API down with
+it. When the lock is not free the run refuses and names the sessions holding
+it, read from `pg_locks`. A dry-run takes no lock and reports those sessions
+instead, which is the check to run before opening the window.
+
+## Two backups, and both are conditions
+
+The **cluster dump** is the operational pre-condition: a `pg_dump -Fc` with
+the sidecar of `backup_attestation` — the cluster it came from, when it was
+taken, the counts it holds, and a restore verified somewhere disposable.
+`--apply` refuses without it, refuses one older than the window, and refuses
+one whose `results` and `result_drivers` counts no longer match this
+database, because a backup that is not a pre-image is not a way back.
+
+The **row backup** is this module's own, and it is a restore test rather
+than a file. The rows are written to a sibling path, fsynced, renamed over,
+the directory fsynced, read back, and hashed; the bytes on disk have to hash
+to what was written and to declare this plan. Then they are inserted into
+temporary tables shaped `LIKE` the real ones and compared against the live
+rows by a digest computed in the database. Only then is the DELETE issued.
+An existing backup file is never overwritten — the name carries the plan
+digest, so a file already there belongs to an earlier attempt at this same
+plan, and replacing it would destroy the only copy of what that attempt
+took.
 
 ## The transaction
 
@@ -49,15 +75,32 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from database.recovery.backup_attestation import (  # noqa: E402
+    AttestationInvalid,
+    DEFAULT_MAX_AGE_HOURS,
+    counts_of,
+)
+from database.recovery.backup_attestation import validate as validate_dump  # noqa: E402
 from database.recovery.dedup_plan import build_plan, plan_digest  # noqa: E402
 
 PLAN_CONTRACT = "openwec-dedup-plan-v2"
 LOCK_NAME = "openwec-dedup-execute"
+
+# SHARE ROW EXCLUSIVE is the lightest mode that conflicts with ROW EXCLUSIVE,
+# which is what INSERT, UPDATE and DELETE take. Readers hold ACCESS SHARE and
+# are not blocked, so the API keeps serving while this runs.
+WRITE_BLOCKING_LOCK = "SHARE ROW EXCLUSIVE"
+LOCK_NOT_AVAILABLE = "55P03"
+
+# The counts the dump has to still describe. A backup taken before other rows
+# moved is not a pre-image of what is about to be deleted.
+PREIMAGE_TABLES = ("results", "result_drivers")
 
 PLAN_KEYS = ("contrato", "series", "resumo", "plan_digest", "sessions",
              "dependencias_de_results", "results_com_referencia_externa")
@@ -219,6 +262,65 @@ def compare_dependencies(aprovado: dict, atual: dict) -> list[str]:
     return motivos
 
 
+# ── Concurrent writers ───────────────────────────────────────
+
+WRITERS_SQL = """
+SELECT DISTINCT a.pid, a.usename, a.application_name, a.state,
+       l.mode, c.relname
+FROM pg_locks l
+JOIN pg_class c ON c.oid = l.relation
+LEFT JOIN pg_stat_activity a ON a.pid = l.pid
+WHERE l.relation IN (to_regclass('results'), to_regclass('result_drivers'))
+  AND l.pid <> pg_backend_pid()
+  AND l.mode NOT IN ('AccessShareLock', 'RowShareLock')
+ORDER BY 1, 6
+"""
+
+
+def writer_sessions(cur) -> list[dict]:
+    """
+    Who is holding a lock on these tables that a writer would hold.
+
+    ACCESS SHARE and ROW SHARE are left out: those are readers, and readers
+    are not what this has to stop. Observational — it says who was there when
+    it was asked, and the table lock below is what actually keeps them out.
+    """
+    cur.execute(WRITERS_SQL)
+    return [{"pid": pid, "usuario": usuario, "aplicacao": app,
+             "estado": estado, "modo": modo, "tabela": tabela}
+            for pid, usuario, app, estado, modo, tabela in cur.fetchall()]
+
+
+def lock_out_writers(conn, cur) -> None:
+    """
+    Keep every other writer off these tables for the rest of the transaction.
+
+    NOWAIT on purpose: waiting would queue this request ahead of the readers
+    that arrive next, so a busy table would take the API down with it. If the
+    lock is not free, the run refuses and says who had it.
+
+    The advisory lock above only coordinates executors that take it. This is
+    what stops an ingestion, a recovery or a psql session.
+    """
+    try:
+        cur.execute(f"LOCK TABLE results, result_drivers "
+                    f"IN {WRITE_BLOCKING_LOCK} MODE NOWAIT")
+        return
+    except Exception as exc:                                  # noqa: BLE001
+        if getattr(exc, "pgcode", None) != LOCK_NOT_AVAILABLE:
+            raise
+    # The failed LOCK aborted the transaction, so the question of who holds it
+    # has to be asked in a new one. Nothing was written either way.
+    conn.rollback()
+    with conn.cursor() as outro:
+        escritores = writer_sessions(outro)
+    conn.rollback()
+    raise ExecutionRefused(
+        [f"results/result_drivers tem escritor ativo; nada foi feito. "
+         f"Sessoes: {escritores or 'o lock nao estava livre e ninguem aparece '
+                                   'em pg_locks agora'}"])
+
+
 # ── Backup ───────────────────────────────────────────────────
 
 COLUMNS_SQL = """
@@ -269,14 +371,63 @@ def backup_payload(cur, ids: list[int]) -> dict:
     }
 
 
-def write_backup(payload: dict, destino: Path) -> dict:
+def _fsync_dir(caminho: Path) -> None:
+    """Windows has no directory handle to sync; the rename is durable there."""
+    try:
+        fd = os.open(caminho, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def write_backup(payload: dict, destino: Path, digest_do_plano: str) -> dict:
+    """
+    Write it, make it durable, read it back, and hash what came back.
+
+    An existing file is never overwritten: the name carries the plan digest,
+    so a file already there belongs to a run of this same plan, and replacing
+    it would destroy the only copy of rows a previous attempt may have taken.
+
+    The write goes to a sibling and is renamed over, with both the file and
+    its directory synced, so the backup is on disk before the DELETE is
+    issued rather than in a buffer that a crash would discard.
+    """
     destino = Path(destino)
+    if destino.exists():
+        raise ExecutionRefused(
+            [f"ja existe backup em {destino}; mova-o antes de repetir a "
+             f"execucao — este executor nao sobrescreve backup"])
     destino.parent.mkdir(parents=True, exist_ok=True)
-    texto = json.dumps(payload, ensure_ascii=False, default=str, indent=1)
-    destino.write_text(texto, encoding="utf-8")
+
+    payload = dict(payload, plan_digest=digest_do_plano)
+    dados = json.dumps(payload, ensure_ascii=False, default=str,
+                       indent=1).encode("utf-8")
+    esperado = hashlib.sha256(dados).hexdigest()
+
+    parcial = destino.with_name(destino.name + ".parcial")
+    with parcial.open("wb") as arquivo:
+        arquivo.write(dados)
+        arquivo.flush()
+        os.fsync(arquivo.fileno())
+    os.replace(parcial, destino)
+    _fsync_dir(destino.parent)
+
+    relido = destino.read_bytes()
+    obtido = hashlib.sha256(relido).hexdigest()
+    if obtido != esperado:
+        raise ExecutionRefused(
+            [f"o backup gravado nao confere ao ser relido: {obtido} != "
+             f"{esperado}"])
     return {
         "caminho": destino.as_posix(),
-        "sha256": hashlib.sha256(texto.encode("utf-8")).hexdigest(),
+        "sha256": obtido,
+        "bytes": len(relido),
+        "plan_digest": digest_do_plano,
         "results": len(payload["results"]["linhas"]),
         "result_drivers": len(payload["result_drivers"]["linhas"]),
     }
@@ -386,8 +537,43 @@ def _counts_by_session(cur, sessoes: list[int]) -> dict[int, int]:
     return {sid: contagem.get(sid, 0) for sid in sessoes}
 
 
+def preimage_check(cur, dump: Path, max_age_hours: int) -> dict:
+    """
+    The cluster dump, as evidence rather than as a filename.
+
+    `backup_attestation` already answers which cluster it came from, when,
+    and whether it restored somewhere disposable — this adds the one question
+    it cannot answer on its own: whether it is still a pre-image of the tables
+    about to be changed.
+    """
+    try:
+        prova = validate_dump(Path(dump), max_age_hours=max_age_hours)
+    except AttestationInvalid as exc:
+        raise ExecutionRefused([f"dump sem evidencia utilizavel: {exc}"]) from exc
+
+    agora = counts_of(cur)
+    divergentes = [
+        f"{t}: dump {prova['contagens'].get(t)} != banco {agora.get(t)}"
+        for t in PREIMAGE_TABLES
+        if prova["contagens"].get(t) != agora.get(t)]
+    if divergentes:
+        raise ExecutionRefused(
+            ["o dump nao e mais uma pre-imagem deste banco: "
+             + "; ".join(divergentes)])
+    return {
+        "caminho": Path(dump).as_posix(),
+        "sha256": prova["sha256"],
+        "cluster_de_origem": prova["cluster_de_origem"],
+        "capturado_em": prova["capturado_em"],
+        "idade_horas": prova["idade_horas"],
+        "restauracao_verificada": bool(prova.get("restauracao")),
+        "contagens": prova["contagens"],
+    }
+
+
 def run_plan(conn, plano: dict, backup_dir: Path | None,
-             aplicar: bool = False) -> dict:
+             aplicar: bool = False, dump: Path | None = None,
+             max_age_hours: int = DEFAULT_MAX_AGE_HOURS) -> dict:
     """
     Dry-run unless `aplicar`. Returns the report; raises ExecutionRefused.
 
@@ -413,17 +599,27 @@ def run_plan(conn, plano: dict, backup_dir: Path | None,
         "sessoes_bloqueadas_inteiras": plano["resumo"].get(
             "sessoes_bloqueadas_inteiras"),
         "backup": None,
+        "dump": None,
+        "escritores_concorrentes": [],
         "divergencias": [],
         "aplicado": False,
     }
 
     with conn.cursor() as cur:
         cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        if aplicar:
+            # First, and before anything takes a snapshot: from here on no
+            # other transaction can write to either table until this one ends.
+            lock_out_writers(conn, cur)
+
         cur.execute("SELECT pg_try_advisory_xact_lock(hashtextextended(%s, 0))",
                     (f"{LOCK_NAME}:{plano['series']}",))
         if not cur.fetchone()[0]:
             raise ExecutionRefused(
                 ["outra execucao ja segura esta populacao; nada foi feito"])
+
+        # In dry-run nothing is held, so this says who would have to stop.
+        relatorio["escritores_concorrentes"] = writer_sessions(cur)
 
         atual = build_plan(cur, plano["series"])
         divergencias = (compare_plans(plano, atual)
@@ -447,11 +643,28 @@ def run_plan(conn, plano: dict, backup_dir: Path | None,
 
         if backup_dir is None:
             raise ExecutionRefused(["--apply exige --backup-dir"])
+        if dump is None:
+            raise ExecutionRefused(
+                ["--apply exige --pg-dump: um pg_dump -Fc do cluster, com a "
+                 "atestacao de backup_attestation e restauracao verificada"])
+
+        relatorio["dump"] = preimage_check(cur, dump, max_age_hours)
 
         payload = backup_payload(cur, removiveis)
         destino = Path(backup_dir) / f"dedup-{plano['plan_digest'][:16]}.json"
-        gravado = write_backup(payload, destino)
-        relido = json.loads(destino.read_text(encoding="utf-8"))
+        gravado = write_backup(payload, destino, plano["plan_digest"])
+
+        # Parsed from the bytes that are on disk, and only after they hash to
+        # what was written: the restore test has to be of the file, not of the
+        # payload still in memory.
+        bruto = destino.read_bytes()
+        if hashlib.sha256(bruto).hexdigest() != gravado["sha256"]:
+            raise ExecutionRefused(
+                [f"o backup em {destino} mudou entre a gravacao e a leitura"])
+        relido = json.loads(bruto.decode("utf-8"))
+        if relido.get("plan_digest") != plano["plan_digest"]:
+            raise ExecutionRefused(
+                ["o backup relido nao declara este plano"])
         falhas = verify_backup(cur, relido, removiveis)
         gravado["estado"] = "restauracao conferida" if not falhas else "FALHOU"
         relatorio["backup"] = gravado
@@ -499,7 +712,14 @@ def main() -> int:
     ap.add_argument("--apply", action="store_true",
                     help="sem isto o modo e dry-run e nada e gravado")
     ap.add_argument("--confirm", help="o plan_digest do plano autorizado")
-    ap.add_argument("--backup-dir", type=Path)
+    ap.add_argument("--backup-dir", type=Path,
+                    help="onde gravar o backup das linhas; nunca sobrescreve")
+    ap.add_argument("--pg-dump", type=Path,
+                    help="pg_dump -Fc do cluster, com a atestacao de "
+                         "backup_attestation (capture + verify-restore)")
+    ap.add_argument("--max-age-hours", type=int, default=DEFAULT_MAX_AGE_HOURS,
+                    help=f"idade maxima da atestacao (padrao: "
+                         f"{DEFAULT_MAX_AGE_HOURS})")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=5433)
     ap.add_argument("--dbname", default="openwec")
@@ -522,6 +742,10 @@ def main() -> int:
         if not args.backup_dir:
             print("RECUSADO: --apply exige --backup-dir")
             return 2
+        if not args.pg_dump:
+            print("RECUSADO: --apply exige --pg-dump — um pg_dump -Fc do "
+                  "cluster com atestacao e restauracao verificada")
+            return 2
 
     cfg = {"host": args.host, "port": args.port, "dbname": args.dbname,
            "user": args.user, "password": args.password}
@@ -529,7 +753,8 @@ def main() -> int:
     # server and not only by the branch below.
     conn = connection(cfg, somente_leitura=not args.apply)
     try:
-        relatorio = run_plan(conn, plano, args.backup_dir, args.apply)
+        relatorio = run_plan(conn, plano, args.backup_dir, args.apply,
+                             args.pg_dump, args.max_age_hours)
     except ExecutionRefused as exc:
         conn.rollback()
         conn.close()
