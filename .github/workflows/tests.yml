@@ -94,7 +94,21 @@ jobs:
           OPENWEC_TEST_DB_IS_DISPOSABLE: "1"
 
       - name: Run enrichment guard tests (no DB needed)
-        run: pytest tests/enrichment/ -v
+        run: pytest tests/enrichment/test_merge_guard.py -v
+
+      # The team-normalization suite does need one: it merges teams and reads
+      # back what stayed, and the foreign keys from `cars` and `entries` to
+      # `teams` are what decide which merges fail. It runs in a schema of its
+      # own, behind the two gates of tests/loader/sandbox.py.
+      - name: Run team normalization tests
+        run: pytest tests/enrichment/test_normalize_teams_exit_code.py -v -ra
+        env:
+          DB_HOST: 127.0.0.1
+          DB_PORT: 5433
+          DB_NAME: openwec
+          DB_USER: openwec
+          DB_PASSWORD: openwec
+          OPENWEC_TEST_DB_IS_DISPOSABLE: "1"
 
       # The recovery suites of PRs #53-#59 had never run here: the job lists
       # its directories one by one and this one was simply missing from the

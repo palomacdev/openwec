@@ -165,7 +165,7 @@ python database/loader/load_laps.py
 # Enrichment
 python database/enrichment/normalize_drivers.py
 python database/enrichment/merge_drivers.py
-python database/enrichment/normalize_teams.py
+python -m database.enrichment.normalize_teams
 
 # Analytics
 python analytics/engine.py --series WEC --session-type Race
@@ -259,7 +259,7 @@ python database/loader/load_laps.py --series WEC
 # 4. Enrich
 python database/enrichment/normalize_drivers.py
 python database/enrichment/merge_drivers.py
-python database/enrichment/normalize_teams.py
+python -m database.enrichment.normalize_teams
 
 # 5. Analytics
 python analytics/engine.py --series WEC --session-type Race
