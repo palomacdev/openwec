@@ -264,13 +264,17 @@ def test_o_update_de_times_e_o_upsert_nao_se_coordenam(sandbox, conn, cur):
         "alcança o UPDATE, e os dois caminhos produzem a mesma identidade")
 
 
-def test_duas_fusoes_simultaneas_se_enfileiram_pelo_lock_de_linha(sandbox, conn, cur):
-    """
-    O que o PostgreSQL já garante sozinho: duas fusões do mesmo time.
+# ── Idempotência do reapontamento ────────────────────────────
 
-    Não há advisory lock aqui tampouco, mas o lock de linha do UPDATE basta —
-    a segunda espera e vê o resultado da primeira. Fica registrado para que a
-    ausência de proteção no teste acima não seja lida como ausência total.
+def test_uma_segunda_fusao_do_mesmo_time_nao_encontra_o_que_mover(sandbox, conn,
+                                                                  cur):
+    """
+    Repetir a fusão não reaponta nada de novo: o UPDATE é idempotente.
+
+    As duas passagens aqui são sequenciais — a primeira comita e fecha antes
+    de a segunda abrir — então isto não diz nada sobre espera concorrente, e
+    não é o que está sendo afirmado. O que fica registrado é mais estreito: a
+    repetição encontra `rowcount == 0` e o carro já está no time canônico.
     """
     cur.execute("INSERT INTO teams (name) VALUES ('Jota Sport') RETURNING id")
     canonico = cur.fetchone()[0]
