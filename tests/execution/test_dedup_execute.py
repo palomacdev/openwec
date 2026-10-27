@@ -7,9 +7,9 @@ see conftest.py for the two gates. The foreign key from `result_drivers` to
 subject: a plan that removes a copy removes its driver links with it.
 
 The data is synthetic and shaped like the corpus: one session whose three
-signatures each appear three times, two of them with identical links and one
-with the links split between two driver rows that differ only in case, and a
-second session with no duplication at all.
+signatures each appear three times, every copy carrying two driver rows and
+one of the three with its second row split between two spellings that differ
+only in case, and a second session with no duplication at all.
 """
 from __future__ import annotations
 
@@ -30,6 +30,7 @@ from database.recovery.dedup_execute import (  # noqa: E402
     load_plan,
     row_digest,
     run_plan,
+    table_columns,
     validate_plan,
 )
 from database.recovery.dedup_plan import build_plan  # noqa: E402
@@ -74,6 +75,7 @@ def semear(conn) -> dict:
         pilotos = {}
         for chave, (primeiro, ultimo) in {
                 "alon": ("Robert", "Alon"),
+                "braun": ("Colin", "Braun"),
                 "ks_min": ("Tom", "Kimber-smith"),
                 "ks_mai": ("Tom", "Kimber-Smith")}.items():
             cur.execute("INSERT INTO drivers (first_name, last_name) "
@@ -99,13 +101,18 @@ def semear(conn) -> dict:
 
                 cur.execute("INSERT INTO result_drivers (result_id, driver_id, "
                             "slot) VALUES (%s, %s, 1)", (result, pilotos["alon"]))
+                # Dois pilotos por carro, como no acervo: 119.661 results
+                # carregam mais de um vinculo, e e essa forma que o digest
+                # do backup tem de atravessar.
                 if numero == "54":
                     # A divergencia: as duas primeiras copias apontam para uma
                     # grafia, a terceira para a outra.
                     segundo = pilotos["ks_min" if copia < 2 else "ks_mai"]
-                    cur.execute("INSERT INTO result_drivers (result_id, "
-                                "driver_id, slot) VALUES (%s, %s, 2)",
-                                (result, segundo))
+                else:
+                    segundo = pilotos["braun"]
+                cur.execute("INSERT INTO result_drivers (result_id, "
+                            "driver_id, slot) VALUES (%s, %s, 2)",
+                            (result, segundo))
 
         # Sessao intacta.
         intacta = []
@@ -262,10 +269,10 @@ def test_execucao_remove_exatamente_o_plano(mundo, dump_valido, tmp_path):
 
     assert relatorio["aplicado"] is True
     assert relatorio["results_removidos"] == 4
-    assert relatorio["vinculos_removidos"] == 4      # um vinculo por copia
+    assert relatorio["vinculos_removidos"] == 8      # dois vinculos por copia
     results_depois, vinculos_depois = contagens(mundo["schema"])
     assert results_depois == results_antes - 4
-    assert vinculos_depois == vinculos_antes - 4
+    assert vinculos_depois == vinculos_antes - 8
 
     conn = connect(mundo["schema"], autocommit=True)
     try:
@@ -442,7 +449,7 @@ def test_o_backup_e_conferido_antes_da_exclusao(mundo, dump_valido, tmp_path):
     backup = relatorio["backup"]
     assert backup["estado"] == "restauracao conferida"
     assert backup["results"] == 4
-    assert backup["result_drivers"] == 4
+    assert backup["result_drivers"] == 8
     assert Path(backup["caminho"]).exists()
 
 
@@ -506,6 +513,164 @@ def test_o_backup_restaura_as_linhas_removidas(mundo, dump_valido, tmp_path):
                               "result_id") == antes_v
     finally:
         conn.close()
+
+
+# ── Ordenacao do digest ──────────────────────────────────────
+
+# A ordenacao que esta PR substitui: pela coluna do filtro, que em
+# `result_drivers` e `result_id` e repete sempre que um result tem mais de
+# um piloto. Fica aqui para que o teste abaixo possa exibir o defeito.
+ORDENACAO_ANTIGA = (
+    'SELECT coalesce(md5(string_agg((t.*)::text, chr(29) '
+    'ORDER BY t."{coluna}")), %s) FROM "{tabela}" t '
+    'WHERE t."{coluna}" = ANY(%s)')
+
+
+def digest_antigo(cur, tabela, ids, coluna="result_id"):
+    cur.execute(ORDENACAO_ANTIGA.format(tabela=tabela, coluna=coluna),
+                ("", list(ids)))
+    return cur.fetchone()[0]
+
+
+def removiveis_de(plano) -> list[int]:
+    return sorted(i for s in plano["sessions"] for i in s["ids_removiveis"])
+
+
+def restaurar_invertido(cur, ids) -> int:
+    """
+    Os mesmos vinculos numa temporaria, inseridos na ordem inversa.
+
+    E o que `verify_backup` faz com o arquivo, com a diferenca de que aqui a
+    ordem fisica e deliberadamente outra: um backup relido nao tem de chegar
+    na mesma ordem em que foi gravado para ser o mesmo backup.
+    """
+    colunas = table_columns(cur, "result_drivers")
+    nomes = ", ".join(f'"{c}"' for c in colunas)
+    cur.execute('CREATE TEMP TABLE restaurado (LIKE result_drivers '
+                'INCLUDING DEFAULTS) ON COMMIT DROP')
+    cur.execute(f'SELECT {nomes} FROM result_drivers '
+                f'WHERE result_id = ANY(%s) ORDER BY id DESC', (ids,))
+    linhas = cur.fetchall()
+    marcas = ", ".join(["%s"] * len(colunas))
+    for linha in linhas:
+        cur.execute(f'INSERT INTO restaurado ({nomes}) VALUES ({marcas})',
+                    linha)
+    return len(linhas)
+
+
+def test_a_coluna_do_filtro_nao_ordena_os_vinculos(mundo):
+    """
+    A premissa do defeito, medida: `result_id` repete, a linha inteira nao.
+    """
+    ids = removiveis_de(mundo["plano"])
+    conn = connect(mundo["schema"], autocommit=True)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT count(*) FROM (SELECT result_id FROM "
+                        "result_drivers WHERE result_id = ANY(%s) "
+                        "GROUP BY result_id HAVING count(*) > 1) t", (ids,))
+            assert cur.fetchone()[0] == len(ids), (
+                "todo result removivel precisa de mais de um vinculo, "
+                "senao o defeito nao tem como aparecer")
+            cur.execute("SELECT count(*), count(DISTINCT (t.*)::text) "
+                        "FROM result_drivers t WHERE t.result_id = ANY(%s)",
+                        (ids,))
+            total, distintas = cur.fetchone()
+            assert total == distintas, "a linha inteira e uma ordem total"
+    finally:
+        conn.close()
+
+
+def test_o_digest_atravessa_vinculos_restaurados_em_outra_ordem(mundo):
+    """
+    O defeito que recusou a execucao de 27/10, reduzido ao minimo.
+
+    As mesmas linhas, de um lado as vivas e do outro as mesmas repostas em
+    ordem inversa. Nada mudou, entao o digest nao pode mudar.
+    """
+    ids = removiveis_de(mundo["plano"])
+    conn = connect(mundo["schema"])
+    try:
+        with conn.cursor() as cur:
+            assert restaurar_invertido(cur, ids) == 8
+            assert (row_digest(cur, "result_drivers", ids, "result_id")
+                    == row_digest(cur, "restaurado", ids, "result_id")), (
+                "linhas identicas em ordem diferente tem de dar o mesmo "
+                "digest")
+    finally:
+        conn.rollback()
+        conn.close()
+
+
+def test_a_ordenacao_antiga_nao_reproduzia_os_mesmos_vinculos(mundo):
+    """
+    O mesmo par de tabelas sob a ordenacao anterior, que desempatava pelo
+    `result_id` e por isso deixava a ordem dentro do empate por conta do
+    executor da consulta.
+    """
+    ids = removiveis_de(mundo["plano"])
+    conn = connect(mundo["schema"])
+    try:
+        with conn.cursor() as cur:
+            restaurar_invertido(cur, ids)
+            vivo = digest_antigo(cur, "result_drivers", ids)
+            restaurado = digest_antigo(cur, "restaurado", ids)
+            if vivo == restaurado:
+                pytest.skip(
+                    "este PostgreSQL devolveu o empate na mesma ordem nas "
+                    "duas tabelas; a ordenacao antiga continua sem garantir "
+                    "isso, e quem prova a correcao e o teste acima")
+            assert vivo != restaurado
+    finally:
+        conn.rollback()
+        conn.close()
+
+
+def test_backup_relido_em_outra_ordem_e_aceito(mundo, dump_valido, tmp_path,
+                                               monkeypatch):
+    """
+    O mesmo defeito pelo caminho inteiro: `verify_backup` com um arquivo
+    cujas linhas chegam em ordem inversa. Um backup nao e uma ordem, e a
+    execucao tem de seguir.
+    """
+    import database.recovery.dedup_execute as executor
+    original = executor.backup_payload
+
+    def inverte(cur, ids):
+        payload = original(cur, ids)
+        for tabela in ("results", "result_drivers"):
+            payload[tabela]["linhas"].reverse()
+        return payload
+
+    monkeypatch.setattr(executor, "backup_payload", inverte)
+    relatorio = executar(mundo["schema"], mundo["plano"], True, tmp_path,
+                         dump_valido)
+    assert relatorio["backup"]["estado"] == "restauracao conferida"
+    assert relatorio["results_removidos"] == 4
+
+
+@pytest.mark.parametrize("coluna, valor", [("driver_id", 999999), ("slot", 9)])
+def test_vinculo_adulterado_no_backup_e_recusado(
+        mundo, dump_valido, tmp_path, monkeypatch, coluna, valor):
+    """
+    A correcao nao pode comprar a igualdade: uma troca real de piloto ou de
+    slot continua sendo divergencia, e nada e apagado.
+    """
+    import database.recovery.dedup_execute as executor
+    original = executor.backup_payload
+
+    def adultera(cur, ids):
+        payload = original(cur, ids)
+        onde = payload["result_drivers"]["colunas"].index(coluna)
+        payload["result_drivers"]["linhas"][0][onde] = valor
+        return payload
+
+    monkeypatch.setattr(executor, "backup_payload", adultera)
+    antes = contagens(mundo["schema"])
+    with pytest.raises(ExecutionRefused) as erro:
+        executar(mundo["schema"], mundo["plano"], True, tmp_path, dump_valido)
+    assert any("result_drivers nao reproduz" in m for m in erro.value.motivos)
+    assert contagens(mundo["schema"]) == antes
 
 
 # ── Sobrescrita de backup ────────────────────────────────────
