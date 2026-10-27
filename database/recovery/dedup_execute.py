@@ -343,10 +343,19 @@ def row_digest(cur, tabela: str, ids: list[int], coluna: str = "id") -> str:
     DECIMAL read back from JSON as a string and the DECIMAL it came from
     produce the same text. Comparing in Python would compare the round trip
     instead of the data.
+
+    The aggregate is ordered by that same rendered row and not by the filter
+    column, because the filter column is not always unique: `result_drivers`
+    is selected by `result_id`, and a result carries one row per driver — in
+    the corpus 119.661 of them carry more than one. Ordering by a key with
+    ties leaves the order inside a tie undefined, so the same rows read from
+    two tables hash differently and a sound backup is refused as unsound.
+    The whole rendered row is a total order: equal rows are interchangeable,
+    so no tie can change the result.
     """
     cur.execute(
         f'SELECT coalesce(md5(string_agg((t.*)::text, chr(29) '
-        f'ORDER BY t."{coluna}")), %s) FROM "{tabela}" t '
+        f'ORDER BY (t.*)::text)), %s) FROM "{tabela}" t '
         f'WHERE t."{coluna}" = ANY(%s)', ("", list(ids)))
     return cur.fetchone()[0]
 
