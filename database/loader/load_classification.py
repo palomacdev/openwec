@@ -1,7 +1,7 @@
 """
 OpenWEC — Phase 2, Pass 2: Classification Loader
 Reads classification CSVs and populates:
-  teams, cars, drivers, results, result_drivers
+  teams, cars, drivers, results, result_drivers, ingest_log
 
 Strategy:
   - Walks raw/ directories for each series
@@ -691,7 +691,73 @@ def upsert_driver(cur, d: dict) -> tuple[int | None, DriverOutcome]:
     return gravado, desfecho
 
 
-def insert_result(cur, session_id: int, car_id: int, row: dict) -> int | None:
+# ── Provenance ───────────────────────────────────────────────
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# The file the loader opened, as a path inside this repository. Not the
+# session's `source_url`: that one is the catalogue page the session was
+# discovered on, and it is what made a row's origin unrecoverable — every
+# result of an event pointed at the same place.
+#
+# Nor the remote URL the file was downloaded from. `catalog/*/ingest_log.json`
+# does record one, but it answers for 874 of the 2.732 classification files
+# this loader selects, and 1.480 of its 2.421 destinations carry more than one
+# URL, because the IMSA collector fetched the same file from two mirrors into
+# the same path. A column whose meaning changed from row to row would be worse
+# than one that always says the same thing.
+def provenance_of(csv_path: Path) -> str:
+    resolved = Path(csv_path).resolve()
+    try:
+        return resolved.relative_to(REPO_ROOT).as_posix()
+    except ValueError:
+        # Run from outside the repository: the absolute path is still the
+        # file that was read, and still truer than nothing.
+        return resolved.as_posix()
+
+
+# The vocabulary is the schema's own: success, error, skipped. A session the
+# loader declined to load is a skip with the reason attached, not an absence.
+INGEST_STATUS = {
+    "ok":                   ("success", None),
+    "empty":                ("skipped", "arquivo de classificacao sem linhas"),
+    "no_session_match":     ("skipped", "nenhuma sessao corresponde a este arquivo"),
+    "ambiguous_session":    ("skipped", "mais de uma sessao responde a este nome"),
+    "contradicted_session": ("skipped", "a unica sessao deste nome pertence a "
+                                        "outro campeonato"),
+}
+
+# ingested_at is set here, not left to the column default: the default only
+# fires on INSERT, and a reingestion that took the UPDATE branch would keep
+# claiming the time of the first run.
+INGEST_UPSERT = """
+    INSERT INTO ingest_log (series_key, source_url, file_type,
+                            status, rows_loaded, error_message, ingested_at)
+    VALUES (%s::series_name, %s, 'classification', %s, %s, %s, NOW())
+    ON CONFLICT (source_url) DO UPDATE
+        SET series_key    = EXCLUDED.series_key,
+            file_type     = EXCLUDED.file_type,
+            status        = EXCLUDED.status,
+            rows_loaded   = EXCLUDED.rows_loaded,
+            error_message = EXCLUDED.error_message,
+            ingested_at   = EXCLUDED.ingested_at
+"""
+
+
+def record_ingestions(cur, registros) -> None:
+    """
+    One row per file processed, keyed on the file.
+
+    `ingest_log.source_url` is UNIQUE, so a second pass over the same file
+    replaces its record instead of adding one. The table keeps the last
+    execution of each file, which is what the constraint already decided.
+    """
+    for registro in registros:
+        cur.execute(INGEST_UPSERT, registro)
+
+
+def insert_result(cur, session_id: int, car_id: int, row: dict,
+                  source_url: str | None = None) -> int | None:
     position = as_int(field(row, "POSITION"))
     laps     = as_int(field(row, "LAPS"))
     fl_lap   = as_int(field(row, "FL_LAPNUM"))
@@ -712,9 +778,10 @@ def insert_result(cur, session_id: int, car_id: int, row: dict) -> int | None:
             total_time_raw, total_time_s,
             gap_to_first_raw, gap_to_first_s,
             gap_to_prev_raw,  gap_to_prev_s,
-            fl_lap_number, fl_time_raw, fl_time_s, fl_kph
+            fl_lap_number, fl_time_raw, fl_time_s, fl_kph,
+            source_url
         )
-        VALUES (%s, %s, %s, %s::entry_status, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s::entry_status, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         -- Every parsed column, not a subset: with a stable car id this branch
         -- is now the one a re-ingestion takes, and a row left half-refreshed
         -- would mix two readings of the same session.
@@ -731,7 +798,8 @@ def insert_result(cur, session_id: int, car_id: int, row: dict) -> int | None:
                 fl_lap_number    = EXCLUDED.fl_lap_number,
                 fl_time_raw      = EXCLUDED.fl_time_raw,
                 fl_time_s        = EXCLUDED.fl_time_s,
-                fl_kph           = EXCLUDED.fl_kph
+                fl_kph           = EXCLUDED.fl_kph,
+                source_url       = EXCLUDED.source_url
         RETURNING id
     """, (
         session_id, car_id, position, status, laps,
@@ -739,6 +807,7 @@ def insert_result(cur, session_id: int, car_id: int, row: dict) -> int | None:
         gap1_raw or None,  parse_gap(gap1_raw),
         gapp_raw or None,  parse_gap(gapp_raw),
         fl_lap, fl_raw or None, parse_lap_time(fl_raw), fl_kph,
+        source_url,
     ))
     row_result = cur.fetchone()
     return row_result[0] if row_result else None
@@ -837,6 +906,7 @@ def find_classification_sessions(raw_dir: Path, series_key: str) -> list[dict]:
 
 def process_session(cur, series_key: str, sess: dict, dry_run: bool) -> dict:
     csv_path     = sess["csv_path"]
+    fonte        = provenance_of(csv_path)
     season_raw   = sess["season_raw"]
     event_raw    = sess["event_raw"]
     session_name = sess["session_name"]
@@ -877,7 +947,7 @@ def process_session(cur, series_key: str, sess: dict, dry_run: bool) -> dict:
         if not car_id:
             continue
 
-        result_id = insert_result(cur, session_id, car_id, row)
+        result_id = insert_result(cur, session_id, car_id, row, fonte)
         if not result_id:
             continue
 
@@ -947,9 +1017,12 @@ def run(series_filter: str | None = None, dry_run: bool = False):
     # an earlier one must not answer with what it folded then.
     forget_driver_index(cur)
 
+    # `rows` is what the files held, `loaded` is what reached the table. They
+    # are not the same number — a row with no NUMBER is dropped — and the run
+    # used to report only the first, which reads as a count of what was saved.
     total = {"sessions": 0, "ok": 0, "no_match": 0, "ambiguous": 0,
              "contradicted": 0, "empty": 0, "errors": 0, "rows": 0,
-             "ambiguous_drivers": 0}
+             "loaded": 0, "ambiguous_drivers": 0}
 
     series_to_run = RAW_DIRS
     if series_filter:
@@ -965,51 +1038,85 @@ def run(series_filter: str | None = None, dry_run: bool = False):
 
         for sess in sessions:
             total["sessions"] += 1
+            fonte = provenance_of(sess["csv_path"])
             try:
                 result = process_session(cur, series_key, sess, dry_run)
                 status = result["status"]
 
-                if status in ("ok", "ok_dry"):
-                    series_stats["ok"] += 1
-                    total["ok"] += 1
-                    total["rows"] += result.get("rows", 0)
-                    total["ambiguous_drivers"] += result.get("ambiguous_drivers", 0)
-                elif status == "no_session_match":
-                    series_stats["no_match"] += 1
-                    total["no_match"] += 1
-                    print(f"  [NO MATCH] {sess['season_raw']} / {sess['event_raw']} / {sess['session_name']}")
-                elif status == "ambiguous_session":
-                    series_stats["ambiguous"] += 1
-                    total["ambiguous"] += 1
-                    print(f"  [AMBIGUOUS SESSION] {sess['season_raw']} / {sess['event_raw']} / {sess['session_name']}")
-                elif status == "contradicted_session":
-                    series_stats["contradicted"] += 1
-                    total["contradicted"] += 1
-                    print(f"  [CONTRADICTED SESSION] {sess['season_raw']} / {sess['event_raw']} / {sess['session_name']}"
-                          f" — the only session of this name belongs to another championship")
-                elif status == "empty":
-                    series_stats["empty"] += 1
-                    total["empty"] += 1
-
-                if not dry_run and status == "ok" and total["ok"] % 50 == 0:
+                if not dry_run:
+                    registro = INGEST_STATUS.get(status)
+                    if registro:
+                        situacao, motivo = registro
+                        record_ingestions(cur, [(series_key, fonte, situacao,
+                                                 result.get("loaded", 0), motivo)])
+                    # The session is the unit of work. Its rows and the record
+                    # of them land together or not at all, and a failure in the
+                    # next one cannot reach back to either.
                     conn.commit()
-                    print(f"  [{series_key}] {total['ok']} sessions loaded...")
 
             except Exception as e:
                 series_stats["errors"] += 1
                 total["errors"] += 1
-                conn.rollback()
                 print(f"  [ERROR] {sess['season_raw']}/{sess['event_raw']}/{sess['session_name']}: {e}")
                 import traceback; traceback.print_exc()
+
+                # The rollback is what keeps a half-read file out of the table.
+                # The record is written after it, in a transaction of its own,
+                # which is the only way the failure survives.
+                conn.rollback()
+                # Drivers written by the rolled-back session are still in the
+                # fold this connection keeps in memory, pointing at ids that no
+                # longer exist. The next session reads the table again.
+                forget_driver_index(cur)
+                if not dry_run:
+                    try:
+                        record_ingestions(
+                            cur, [(series_key, fonte, "error", 0, str(e))])
+                        conn.commit()
+                    except Exception as falha_do_log:   # noqa: BLE001
+                        # Recording a failure must not become one. Whatever
+                        # state this left the connection in, the next session
+                        # starts from a clean transaction.
+                        conn.rollback()
+                        print(f"  [ERROR] o registro da falha nao pode ser "
+                              f"gravado: {falha_do_log}")
+                continue
+
+            # Counted after the commit, so the summary says what is in the
+            # table rather than what was attempted.
+            if status in ("ok", "ok_dry"):
+                series_stats["ok"] += 1
+                total["ok"] += 1
+                total["rows"] += result.get("rows", 0)
+                total["loaded"] += result.get("loaded", 0)
+                total["ambiguous_drivers"] += result.get("ambiguous_drivers", 0)
+            elif status == "no_session_match":
+                series_stats["no_match"] += 1
+                total["no_match"] += 1
+                print(f"  [NO MATCH] {sess['season_raw']} / {sess['event_raw']} / {sess['session_name']}")
+            elif status == "ambiguous_session":
+                series_stats["ambiguous"] += 1
+                total["ambiguous"] += 1
+                print(f"  [AMBIGUOUS SESSION] {sess['season_raw']} / {sess['event_raw']} / {sess['session_name']}")
+            elif status == "contradicted_session":
+                series_stats["contradicted"] += 1
+                total["contradicted"] += 1
+                print(f"  [CONTRADICTED SESSION] {sess['season_raw']} / {sess['event_raw']} / {sess['session_name']}"
+                      f" — the only session of this name belongs to another championship")
+            elif status == "empty":
+                series_stats["empty"] += 1
+                total["empty"] += 1
+
+            if not dry_run and total["ok"] and total["ok"] % 50 == 0:
+                print(f"  [{series_key}] {total['ok']} sessions loaded...")
 
         print(f"  ✓ {series_stats['ok']}  no_match: {series_stats['no_match']}"
               f"  ambiguous: {series_stats['ambiguous']}"
               f"  contradicted: {series_stats['contradicted']}"
               f"  empty: {series_stats['empty']}  errors: {series_stats['errors']}")
 
-    if not dry_run:
-        conn.commit()
-
+    # No final commit: every session committed its own transaction, and a
+    # second one here would only hide a write that escaped the loop.
     cur.close()
     conn.close()
 
@@ -1020,7 +1127,8 @@ def run(series_filter: str | None = None, dry_run: bool = False):
     print(f"  No DB match:        {total['no_match']}")
     print(f"  Empty files:        {total['empty']}")
     print(f"  Errors:             {total['errors']}")
-    print(f"  Total rows:         {total['rows']}")
+    print(f"  Rows in the files:  {total['rows']}")
+    print(f"  Rows persisted:     {total['loaded']}")
 
 
 if __name__ == "__main__":

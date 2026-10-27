@@ -112,7 +112,8 @@ def test_o_sandbox_cobre_as_tabelas_que_o_loader_escreve():
     nele.
     """
     assert set(SANDBOX_TABLES) == {"series", "seasons", "events", "teams",
-                                   "drivers", "sessions", "cars", "results"}
+                                   "drivers", "sessions", "cars", "results",
+                                   "ingest_log"}
 
 
 def test_a_limpeza_nao_e_por_delete():
