@@ -424,7 +424,7 @@ def test_build_plan_so_seleciona():
           "http://x/Results/16_2016/08_Belle/21_IMSA WeatherTech/2016_P1/a.CSV")],
     ])
     plano = build_plan(cur)
-    assert plano["contrato"] == "openwec-dedup-plan-v1"
+    assert plano["contrato"] == "openwec-dedup-plan-v2"
     assert all(s.strip().upper().startswith("SELECT")
                for s, _ in cur.executados), "o planejador so le"
     # as chaves, e depois results, result_drivers e sessions

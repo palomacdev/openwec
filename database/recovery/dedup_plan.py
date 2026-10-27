@@ -166,6 +166,22 @@ def digest(assinaturas) -> str:
     return h.hexdigest()
 
 
+def links_digest(ids, vinculos: dict[int, set]) -> str:
+    """
+    The driver links of a set of results, as one string.
+
+    The executor compares this against the live table before it deletes
+    anything: a link added or repointed since the plan was approved changes
+    it, and the plan is refused rather than applied to a different corpus.
+    """
+    h = hashlib.sha256()
+    for i in sorted(ids):
+        for slot, driver_id in sorted(vinculos.get(i, ())):
+            h.update(f"{i}:{slot}:{driver_id}".encode())
+            h.update(b"")
+    return h.hexdigest()
+
+
 def group_results(linhas) -> dict[str, list[int]]:
     """
     {signature: [result_id, ...]} with the ids ascending.
@@ -219,7 +235,8 @@ def plan_session(meta: dict, grupos: dict[str, list[int]],
     `vinculos` maps a result id to its set of (slot, driver_id). A result
     with no links maps to the empty set, which is a subset of anything.
     """
-    total_atual = sum(len(ids) for ids in grupos.values())
+    todos = sorted(i for ids in grupos.values() for i in ids)
+    total_atual = len(todos)
     entrada = {
         "session_id": meta["session_id"],
         "session_name": meta.get("session_name"),
@@ -227,6 +244,10 @@ def plan_session(meta: dict, grupos: dict[str, list[int]],
         "season": meta.get("season"),
         "event": meta.get("event"),
         "championship": meta.get("championship"),
+        # What the executor re-reads the database for: the content of this
+        # session and the links hanging off it, both as of the plan.
+        "conteudo_sha256": digest(grupos),
+        "vinculos_sha256": links_digest(todos, vinculos),
         "arquivo_candidato": None,
         "sha256": None,
         "arquivos_candidatos": [],
@@ -584,14 +605,17 @@ WHERE sr.key = %s
 """
 
 
+# `to_regclass`, not a name comparison: the table this resolves to is the one
+# `search_path` resolves, which is what the planner itself reads. A name match
+# would answer for every schema at once, so a suite running in a schema of its
+# own would be told about public's keys and not about its own.
 FOREIGN_KEYS_SQL = """
 SELECT src.relname, att.attname, con.confdeltype
 FROM pg_constraint con
 JOIN pg_class src ON src.oid = con.conrelid
-JOIN pg_class tgt ON tgt.oid = con.confrelid
 JOIN unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord) ON true
 JOIN pg_attribute att ON att.attrelid = src.oid AND att.attnum = k.attnum
-WHERE con.contype = 'f' AND tgt.relname = 'results'
+WHERE con.contype = 'f' AND con.confrelid = to_regclass('results')
 ORDER BY 1, 2
 """
 
@@ -666,7 +690,10 @@ def build_plan(cur, series: str = "IMSA", indice: dict | None = None) -> dict:
         for sid in sorted(grupos)
     ]
     return {
-        "contrato": "openwec-dedup-plan-v1",
+        # v2 adds conteudo_sha256 and vinculos_sha256 per session. The
+        # executor requires them, so a v1 plan is refused rather than applied
+        # against a corpus it cannot check.
+        "contrato": "openwec-dedup-plan-v2",
         "series": series,
         "revisao_historica": HISTORICAL_REVISION,
         "campos_da_assinatura": list(SIGNATURE_FIELDS),
