@@ -21,6 +21,10 @@ directly puts its own directory there instead:
 Exit codes:
     0  nothing failed, including when there was nothing to merge
     1  it ran and at least one merge failed; the summary names which
+    3  every merge went through and a resource refused to close afterwards.
+       Separate from 1 on purpose: the data is in the state the merges left
+       it, and a caller that only cares whether the rows are right can tell
+       that apart from a merge that did not happen
 
 The output is ASCII on purpose. The decorations this file used to print — an
 arrow, a tick, a cross — have no cp1252 encoding, which is what a Windows
@@ -128,6 +132,11 @@ def run(dry_run: bool = False) -> int:
     merges already committed. What changes here is only that the failure
     reaches the caller — the run used to end with `Errors: 1` and exit 0.
 
+    Closing the cursors and the connection is reported too, under its own
+    code, because a connection that has already dropped says so there and
+    nowhere else. It never displaces a merge or rollback failure: those keep
+    the exit code, and the closing trouble is printed under them.
+
     `cars` stays the only table repointed. `entries` and `entry_team_history`
     reference `teams` as well, so a team either of them holds cannot be
     deleted and that merge fails on the foreign key. That is the current
@@ -212,11 +221,20 @@ def run(dry_run: bool = False) -> int:
                     break
                 falhas.append((dup_id, canonical_id, motivo))
 
-    for fechavel in (write_cur, cur, conn):
+    # Every resource is closed even when an earlier one refused to, and a
+    # refusal is recorded rather than swallowed: closing is where a connection
+    # that has already gone announces itself, and that announcement was the
+    # one piece of evidence this loop used to throw away. It cannot change
+    # what was committed, and it is not allowed to displace the merge or
+    # rollback failures reported below it either.
+    problemas_ao_fechar: list[str] = []
+    for nome, fechavel in (("write_cur", write_cur), ("cur", cur),
+                           ("conn", conn)):
         try:
             fechavel.close()
-        except Exception:                 # noqa: BLE001
-            pass                          # ja fechado, ou a conexao se perdeu
+        except Exception as falha_ao_fechar:          # noqa: BLE001
+            problemas_ao_fechar.append(
+                f"{nome}: {_primeira_linha(falha_ao_fechar)}")
 
     print(f"\n  Merged:  {merged}")
     print(f"  Deleted: {merged}")
@@ -229,7 +247,21 @@ def run(dry_run: bool = False) -> int:
             print(f"  team {de} -> {para}: {motivo}")
         if interrompido:
             print("  (a execucao parou antes de tentar as fusoes restantes)")
+
+    if problemas_ao_fechar:
+        print(f"\n[CLOSE] {len(problemas_ao_fechar)} recurso(s) nao fecharam "
+              f"sem erro")
+        for linha in problemas_ao_fechar:
+            print(f"  {linha}")
+        print("  o que foi comitado continua comitado; nenhuma fusao depende "
+              "deste fechamento")
+
+    # A merge that failed is the graver fact and keeps the code, so a bad
+    # shutdown can never stand in front of it.
+    if falhas:
         return 1
+    if problemas_ao_fechar:
+        return 3
     return 0
 
 

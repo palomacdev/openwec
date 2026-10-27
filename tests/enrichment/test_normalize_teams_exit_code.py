@@ -215,14 +215,54 @@ def test_a_inscricao_nao_e_tocada(banco, schema_times, monkeypatch, duas_fusoes)
 
 # ── Falha no commit e no rollback ────────────────────────────
 
-class ConexaoQueFalha:
-    """A conexão de verdade, com `commit` ou `rollback` quebrados."""
+class CursorQueNaoFecha:
+    """O cursor de verdade, que recusa fechar."""
 
-    def __init__(self, real, quebrar_commit=False, quebrar_rollback=False):
+    def __init__(self, real):
+        self._real = real
+        self.pedidos_de_close = 0
+
+    def close(self):
+        self.pedidos_de_close += 1
+        raise psycopg2.InterfaceError("cursor already closed")
+
+    def __getattr__(self, nome):
+        return getattr(self._real, nome)
+
+    def __enter__(self):
+        return self._real.__enter__()
+
+    def __exit__(self, *args):
+        return self._real.__exit__(*args)
+
+
+class ConexaoQueFalha:
+    """A conexão de verdade, com `commit`, `rollback` ou `close` quebrados."""
+
+    def __init__(self, real, quebrar_commit=False, quebrar_rollback=False,
+                 quebrar_close=False, quebrar_close_do_cursor=False):
         self._real = real
         self.quebrar_commit = quebrar_commit
         self.quebrar_rollback = quebrar_rollback
+        self.quebrar_close = quebrar_close
+        self.quebrar_close_do_cursor = quebrar_close_do_cursor
         self.rollbacks = 0
+        self.pedidos_de_close = 0
+        self.cursores: list[CursorQueNaoFecha] = []
+
+    def cursor(self, **kwargs):
+        real = self._real.cursor(**kwargs)
+        if not self.quebrar_close_do_cursor:
+            return real
+        embrulhado = CursorQueNaoFecha(real)
+        self.cursores.append(embrulhado)
+        return embrulhado
+
+    def close(self):
+        self.pedidos_de_close += 1
+        if self.quebrar_close:
+            raise psycopg2.OperationalError("server closed the connection")
+        self._real.close()
 
     def commit(self):
         if self.quebrar_commit:
@@ -297,6 +337,117 @@ def test_falha_no_rollback_nao_esconde_o_erro_original(banco, schema_times,
     assert "(a execucao parou antes de tentar as fusoes restantes)" in saida
     # A segunda fusão não foi tentada: uma falha, não duas.
     assert "[FAILURES] 1 merge(s)" in saida
+
+
+# ── Falha ao fechar os recursos ──────────────────────────────
+
+def test_falha_ao_fechar_apos_merges_devolve_tres(banco, schema_times,
+                                                  monkeypatch):
+    """
+    As fusões passaram e a conexão recusou fechar.
+
+    Código próprio, e não 1: o que foi comitado está comitado, e quem só
+    precisa saber se as linhas ficaram certas pode distinguir isto de uma
+    fusão que não aconteceu.
+    """
+    canonico = time(banco, "AF Corse")
+    duplicado = time(banco, "AF CORSE")
+    meu_carro = carro(banco, "51", duplicado)
+
+    real = conectar(schema_times, autocommit=False)
+    conexao = ConexaoQueFalha(real, quebrar_close=True)
+    try:
+        codigo, saida = executa_com(schema_times, monkeypatch, conexao)
+    finally:
+        if not real.closed:
+            real.close()
+
+    assert codigo == 3
+    assert "[FAILURES]" not in saida, "nao houve falha de fusao"
+    assert "[CLOSE] 1 recurso(s)" in saida
+    assert "conn: server closed the connection" in saida
+    assert "o que foi comitado continua comitado" in saida
+    # E as fusões realmente ficaram.
+    assert times(banco) == {canonico}
+    assert time_do_carro(banco, meu_carro) == canonico
+
+
+def test_a_falha_ao_fechar_nao_desloca_a_falha_de_merge(banco, schema_times,
+                                                        monkeypatch,
+                                                        duas_fusoes):
+    """
+    Os dois problemas juntos: a fusão que falhou continua sendo o que decide.
+    """
+    real = conectar(schema_times, autocommit=False)
+    conexao = ConexaoQueFalha(real, quebrar_close=True)
+    try:
+        codigo, saida = executa_com(schema_times, monkeypatch, conexao)
+    finally:
+        if not real.closed:
+            real.close()
+
+    assert codigo == 1, "o fechamento quebrado tomou o lugar da fusao que falhou"
+    assert "[FAILURES] 1 merge(s)" in saida
+    assert "entries_team_id_fkey" in saida
+    assert "[CLOSE] 1 recurso(s)" in saida
+    assert saida.index("[FAILURES]") < saida.index("[CLOSE]")
+
+
+def test_um_recurso_que_nao_fecha_nao_impede_os_outros(banco, schema_times,
+                                                       monkeypatch):
+    """
+    Os dois cursores recusam fechar, e a conexão ainda assim é fechada.
+
+    Era o risco de tratar o fechamento como uma coisa só: o primeiro erro
+    levaria embora a chance de liberar o resto.
+    """
+    time(banco, "Jota")
+    duplicado = time(banco, "JOTA")
+    carro(banco, "38", duplicado)
+
+    real = conectar(schema_times, autocommit=False)
+    conexao = ConexaoQueFalha(real, quebrar_close_do_cursor=True)
+    try:
+        codigo, saida = executa_com(schema_times, monkeypatch, conexao)
+    finally:
+        if not real.closed:
+            real.close()
+
+    assert codigo == 3
+    assert "[CLOSE] 2 recurso(s)" in saida
+    assert "write_cur: cursor already closed" in saida
+    assert "cur: cursor already closed" in saida
+    assert all(c.pedidos_de_close == 1 for c in conexao.cursores), \
+        "algum cursor nao chegou a ser fechado"
+    assert conexao.pedidos_de_close == 1, "a conexao nao chegou a ser fechada"
+    assert real.closed, "a conexao de verdade ficou aberta"
+
+
+def test_o_fechamento_quebrado_nao_esconde_o_erro_de_rollback(banco,
+                                                              schema_times,
+                                                              monkeypatch):
+    """
+    Commit, rollback e fechamento, os três quebrados ao mesmo tempo.
+
+    O erro original tem de continuar legível no meio disso.
+    """
+    canonico = time(banco, "AF Corse")
+    duplicado = time(banco, "AF CORSE")
+
+    real = conectar(schema_times, autocommit=False)
+    conexao = ConexaoQueFalha(real, quebrar_commit=True, quebrar_rollback=True,
+                              quebrar_close=True)
+    try:
+        codigo, saida = executa_com(schema_times, monkeypatch, conexao)
+    finally:
+        if not real.closed:
+            real.close()
+
+    assert codigo == 1
+    assert "conexao caiu no commit" in saida, "o erro original sumiu"
+    assert "o rollback tambem falhou" in saida
+    assert f"team {duplicado} -> {canonico}" in saida
+    assert "[CLOSE]" in saida
 
 
 # ── A saída, e o console que não fala Unicode ────────────────
