@@ -49,8 +49,11 @@ FIXTURE_CEILING = {"results": 1_000, "laps": 1_000, "cars": 1_000}
 # resolving a session joins all three, and a table missing from the sandbox
 # would resolve through search_path to the one in public — that is, the
 # suite would read the real corpus.
+# ingest_log is written by the loader and read by nothing else here; it is
+# mirrored so the provenance suite can exercise the real UNIQUE (source_url)
+# instead of restating it.
 SANDBOX_TABLES = ("series", "seasons", "events", "teams", "drivers",
-                  "sessions", "cars", "results")
+                  "sessions", "cars", "results", "ingest_log")
 
 
 def declared_disposable() -> bool:
@@ -88,11 +91,17 @@ def connect_to_sandbox(sandbox: dict):
     import psycopg2
 
     conn = psycopg2.connect(connect_timeout=5, **sandbox["db"])
-    conn.autocommit = False
+
+    # Outside a transaction on purpose. SET is transactional in PostgreSQL, so
+    # a path set inside one goes back to the default on ROLLBACK — and a suite
+    # that rolls back to simulate a failed load would carry on writing to
+    # public. In autocommit the statement reaches the session itself.
+    conn.autocommit = True
     with conn.cursor() as cur:
         # public stays on the path for the enum types the loader casts to; it
         # comes second, so every table the loader names resolves to the sandbox.
         cur.execute(f'SET search_path TO "{sandbox["schema"]}", public')
+    conn.autocommit = False
     return conn
 
 
