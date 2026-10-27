@@ -96,6 +96,12 @@ jobs:
       - name: Run enrichment guard tests (no DB needed)
         run: pytest tests/enrichment/test_merge_guard.py -v
 
+      # A static sweep of the source for writers of `results`. It reads files
+      # as text, opens no connection and imports no production module, so it
+      # is deliberately given no database env.
+      - name: Run repository guard tests (no DB needed)
+        run: pytest tests/guards/ -v -ra --strict-markers
+
       # The team-normalization suite does need one: it merges teams and reads
       # back what stayed, and the foreign keys from `cars` and `entries` to
       # `teams` are what decide which merges fail. It runs in a schema of its
