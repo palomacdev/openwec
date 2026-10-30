@@ -248,8 +248,13 @@ def sequencia_de_escrita(car_id_sem_voltas: int) -> list:
     return (
         identidade(car_id_sem_voltas)         # team + car do carro 47
         + [[]]                                # DELETE results, nada a remover
-        + [[(None, None, None, None)], [(500,)]]   # carro 3: colunas, result
-        + [[(None, None, None, None)], [(501,)]]   # carro 47: colunas, result
+        # Por carro, na ordem em que `recover_session` consulta: a identidade
+        # guardada (oito colunas), a busca por gemeo de identidade, as quatro
+        # colunas preenchiveis, e a insercao do resultado.
+        + [[("3", 7, None, None, None, None, None, None)], [],
+           [(None, None, None, None)], [(500,)]]    # carro 3
+        + [[("47", 7, None, None, None, None, None, None)], [],
+           [(None, None, None, None)], [(501,)]]    # carro 47
     )
 
 

@@ -118,14 +118,30 @@ jobs:
 
       # The recovery suites of PRs #53-#59 had never run here: the job lists
       # its directories one by one and this one was simply missing from the
-      # list. They need no database — every psycopg2 import on their path is
-      # lazy and no test opens a connection — so no env is given to this
-      # step on purpose. With no DB_HOST, DB_PORT or DB_PASSWORD in scope,
-      # a test that tried to connect would have nothing to connect to.
-      - name: Run recovery assessment tests (no DB needed)
+      # list. They were given no database on purpose, because none of them
+      # opened a connection.
+      #
+      # One does now. `identity_twin` refuses to create a second car that
+      # answers to an identity this session already uses, and the predicate
+      # it refuses by reads `results` and `laps` — a fake cursor can only
+      # assert the SQL, not that PostgreSQL agrees with it. So this step gets
+      # the same service container and the same disposable declaration the
+      # loader step uses, and the suite runs in a schema of its own.
+      #
+      # The step below still treats a skip as an error, which is what makes
+      # this env necessary rather than optional: without it the guard suite
+      # would skip itself and the failure would be silent.
+      - name: Run recovery assessment tests
         run: |
           pytest tests/recovery/ -v -ra --strict-markers \
             --junitxml=recovery-results.xml
+        env:
+          DB_HOST: 127.0.0.1
+          DB_PORT: 5433
+          DB_NAME: openwec
+          DB_USER: openwec
+          DB_PASSWORD: openwec
+          OPENWEC_TEST_DB_IS_DISPOSABLE: "1"
 
       # pytest exits non-zero on a failure and on an empty collection, but
       # it exits zero on a test that quietly skipped itself. This suite is
