@@ -42,7 +42,9 @@ sys.path.insert(0, str(RAIZ / "database" / "loader"))
 psycopg2 = pytest.importorskip("psycopg2")
 
 from tests.loader.sandbox import connect_to_sandbox  # noqa: E402
-from load_classification import car_identity, upsert_car  # noqa: E402
+from load_classification import (  # noqa: E402
+    car_identity, insert_result, upsert_car,
+)
 
 from database.enrichment import normalize_teams as nt  # noqa: E402
 from database.recovery import recover_classification as rc  # noqa: E402
@@ -238,6 +240,14 @@ def test_o_update_de_times_e_o_upsert_nao_se_coordenam(sandbox, conn, cur):
                       **dict(zip(("vehicle", "car_class", "car_group", "tires",
                                   "imsa_car_id", "imsa_team_id"),
                                  car_identity("22", duplicado, row)[2:])))
+    # Desde R2-B a busca so alcanca carros que a sessao aponta, entao o alvo
+    # tem de estar preso a ela — caso contrario o teste passaria por falta de
+    # escopo, e nao pela falta de coordenacao que ele existe para mostrar.
+    cur.execute("INSERT INTO sessions (event_id, raw_id, name) "
+                "VALUES (%s, %s, %s) RETURNING id",
+                (1, "zz_sandbox_fusao", "Race"))
+    sessao = cur.fetchone()[0]
+    insert_result(cur, sessao, alvo, row)
     conn.commit()
 
     fusao = connect_to_sandbox(sandbox)
@@ -249,7 +259,7 @@ def test_o_update_de_times_e_o_upsert_nao_se_coordenam(sandbox, conn, cur):
                       (canonico, duplicado))
 
         with ingestao.cursor() as i:
-            novo = upsert_car(i, "22", canonico, row, "ELMS")
+            novo = upsert_car(i, "22", canonico, row, "ELMS", sessao)
         ingestao.commit()
 
         fusao.commit()
@@ -362,10 +372,12 @@ def test_a_fusao_desfaz_e_segue_quando_um_merge_falha(monkeypatch, capsys):
     deixaria iguais de qualquer jeito.
     """
     leitura = CursorFalso()
-    # O trecho e escrito assim, e nao pelo comeco do statement, porque
-    # test_sandbox_guard proibe o literal de exclusao nas suites de loader —
-    # uma proibicao que vale, ja que um DELETE aqui alcancaria linhas reais.
-    escrita = CursorFalso(falhar_em="teams WHERE id")
+    # So a palavra, e nao o comeco do statement, porque test_sandbox_guard
+    # proibe o literal de exclusao nas suites de loader — uma proibicao que
+    # vale, ja que uma exclusao aqui alcancaria linhas reais. E e ela, e nao
+    # "teams WHERE id", porque desde R1 a fusao tambem **le** essa linha
+    # (`toma_a_equipe`), e o trecho antigo falhava naquela leitura.
+    escrita = CursorFalso(falhar_em="DELETE")
     conexao = ConexaoFalsa(leitura, escrita)
     monkeypatch.setattr(nt.psycopg2, "connect", lambda **kw: conexao)
     monkeypatch.setattr(nt, "find_duplicate_groups", lambda cur: [
@@ -380,6 +392,12 @@ def test_a_fusao_desfaz_e_segue_quando_um_merge_falha(monkeypatch, capsys):
 
     atualizacoes = [s for s in escrita.sql if s.startswith("UPDATE cars")]
     assert len(atualizacoes) == 2, "a segunda fusão não foi tentada"
+    # As linhas sao tomadas sem esperar, antes de qualquer escrita: as duas
+    # equipes e os carros da duplicada, em cada uma das duas fusoes.
+    tomadas = [s for s in escrita.sql if "FOR UPDATE NOWAIT" in s]
+    assert len(tomadas) == 4
+    assert sum("FROM teams" in s for s in tomadas) == 2
+    assert sum("FROM cars" in s for s in tomadas) == 2
     assert conexao.rollbacks == 2, "a falha não foi desfeita"
     assert conexao.commits == 0, "comitou apesar da falha"
     assert "[ERROR]" in saida

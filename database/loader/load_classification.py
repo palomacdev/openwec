@@ -604,10 +604,119 @@ _CAR_INSERT = (
     f"VALUES ({', '.join(['%s'] * len(CAR_COLUMNS))}) RETURNING id"
 )
 
-
-def upsert_car(cur, number: str, team_id: int, row: dict, series_key: str) -> int | None:
+def car_identity_lock_key(session_id: int, attrs: tuple) -> str:
     """
-    The car this row is about: the one already stored, or a new one.
+    A chave sob a qual uma identidade de carro e serializada, numa sessao.
+
+    Serializar por (sessao, identidade) e nao pela tabela: duas ingestoes de
+    carros diferentes, ou do mesmo carro em sessoes diferentes, nunca esperam
+    uma pela outra.
+
+    Esta funcao existe para que **nao haja uma segunda chave**. Quem escreve
+    em `cars` de um jeito que muda a identidade — a ingestao, que a cria, e a
+    fusao de times, que a altera — tem de disputar a mesma, ou o lock de uma
+    nao significa nada para a outra.
+    """
+    return repr((session_id,) + tuple(attrs))
+
+
+def lock_car_identity(cur, session_id: int, attrs: tuple) -> None:
+    """
+    Toma o lock daquela identidade naquela sessao, ate o fim da transacao.
+
+    `pg_advisory_xact_lock` bloqueia ate obter, e solta no COMMIT ou no
+    ROLLBACK — nao ha o que liberar a mao, e uma falha no meio nao deixa lock
+    pendurado.
+    """
+    cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                (car_identity_lock_key(session_id, attrs),))
+
+
+def try_lock_car_identity(cur, session_id: int, attrs: tuple) -> bool:
+    """
+    O mesmo lock, mas sem esperar: devolve False se ja estiver tomado.
+
+    Quem toma **um** lock por vez pode esperar a vontade. Quem toma varios
+    numa transacao so pode esperar se todos concordarem na ordem, e nao ha
+    como fazer os dois lados concordarem aqui: a ingestao resolve as
+    identidades na ordem do arquivo, uma por linha, e a fusao de equipes as
+    descobre por consulta e so pode ordena-las pela chave. `MEASURED`: com
+    dois carros de uma sessao e um arquivo que os lista na ordem inversa da
+    ordenada, o PostgreSQL detecta `deadlock detected` e aborta uma das duas.
+
+    Ordenar de um lado so nao resolve, e ninguem deve esperar que resolva.
+    Quem toma varios locks usa esta funcao e **desiste** quando nao os obtem
+    todos — uma fusao que nao consegue ver um estado estavel e uma fusao que
+    nao acontece, nao uma que forca.
+    """
+    cur.execute("SELECT pg_try_advisory_xact_lock(hashtextextended(%s, 0))",
+                (car_identity_lock_key(session_id, attrs),))
+    return bool(cur.fetchone()[0])
+
+
+def car_session_scope(alias: str = "c", marcador: str = "%(sessao)s") -> str:
+    """
+    What it means for a car to belong to a session: the SQL, written once.
+
+    A car belongs to a session when the session points at it — by a result or
+    by a lap — and by nothing else. Sharing eight attributes with a car of
+    another season is a description two entries happen to share, not a claim
+    that either belongs here.
+
+    This exists as one function because two places need the predicate and two
+    copies would drift: `_CAR_IN_SESSION`, which resolves which car an
+    ingested row is about, and `recover_classification.identity_twin`, which
+    refuses to create a second car answering to one identity. A guard that
+    scoped differently from the lookup it guards would be guarding something
+    else.
+
+    `alias` is the table alias the caller gave `cars`; `marcador` is the
+    placeholder that carries the session id, named or positional. A
+    positional caller passes the id **twice**, because the fragment names it
+    twice.
+    """
+    return (f"(EXISTS (SELECT 1 FROM results r "
+            f"WHERE r.session_id = {marcador} AND r.car_id = {alias}.id)"
+            f" OR EXISTS (SELECT 1 FROM laps l "
+            f"WHERE l.session_id = {marcador} AND l.car_id = {alias}.id))")
+
+
+# The candidates for one session, and whether each already carries that
+# session's laps. Scoped twice over: the row must match on every column of
+# CAR_COLUMNS, and it must already belong to this session. A car no statement
+# of this session points at is not a candidate here, whatever its attributes
+# say.
+_CAR_IN_SESSION = f"""
+    SELECT c.id,
+           EXISTS (SELECT 1 FROM laps l
+                    WHERE l.session_id = %(sessao)s AND l.car_id = c.id)
+      FROM cars c
+     WHERE {" AND ".join(f"c.{col} IS NOT DISTINCT FROM %({col})s"
+                         for col in CAR_COLUMNS)}
+       AND {car_session_scope("c")}
+     ORDER BY c.id
+"""
+
+
+class CarIdentityAmbiguous(Exception):
+    """
+    Two cars of one session carry this identity and both carry laps.
+
+    Choosing one would put the published result on one car and leave the
+    other's laps answering to nothing, which is the association this scope
+    exists to prevent. `MEASURED` on the corpus: 687 (session, identity)
+    groups are in that state, spread over 343 of the 2.902 sessions that
+    have a classification, 7 of them contaminated. They are the residue of
+    the loader that minted a car per row; nothing written under this scope
+    can add to them.
+    """
+
+
+def upsert_car(cur, number: str, team_id: int, row: dict, series_key: str,
+               session_id: int) -> int | None:
+    """
+    The car this row is about, **within this session**: the one already
+    stored for it, or a new one.
 
     Identity is the eight columns of CAR_COLUMNS and nothing else.
     `manufacturer` and `tyre_supplier` are deliberately outside it: they are
@@ -621,33 +730,77 @@ def upsert_car(cur, number: str, team_id: int, row: dict, series_key: str) -> in
     NULLS NOT DISTINCT semantics the competitive-entry model uses, for the
     same reason.
 
-    The lookup and the insert are serialised per identity, not per table: the
-    advisory lock below is keyed on the attributes, so two ingestions of
-    different cars never wait on each other, and two ingestions of the same
-    car cannot both find nothing and both insert.
+    Why the session scopes it (R2-B)
+    --------------------------------
+    The eight attributes describe a car; they do not identify an entry.
+    `MEASURED` on the corpus: 4.148 of the 4.458 distinct identities are
+    carried by entries of more than one session, one of them by 290 —
+    #88 Proton Competition on a Porsche 911 RSR answers for Silverstone 2015
+    and for Paul Ricard 2019 alike. A lookup that ignores the session
+    therefore does not find *this* entry's car; it finds the oldest row that
+    happens to be described the same way.
+
+    What that costs is not a wrong attribute, it is a broken join: `results`
+    and `laps` are both keyed on (session, car), and every one of the 58.359
+    (session, car) pairs that carries a lap has a result on the same row. An
+    ingestion that resolved to another session's car would write the result
+    against a car the laps do not know.
+
+    Scoping the lookup is the whole change. Nothing is deduplicated, no
+    attribute is decided, and `resolve_car_id` — which already scopes the
+    lap side by session — is untouched.
+
+    What it does when several rows answer
+    -------------------------------------
+    Candidates found this way are identical in every column the loader
+    writes, so they are duplicates of one identity rather than competing
+    entries — the distinction `row_identity.choose_car` already draws.
+
+      one carries this session's laps   that one, whatever its id. 68 groups
+                                        have a lap carrier that is **not**
+                                        the lowest id, and taking the lowest
+                                        would separate the result from the
+                                        laps
+      none carries laps                 the lowest id: a canonical
+                                        representative among rows proven
+                                        identical, stable across runs
+      several carry laps                refused — see CarIdentityAmbiguous
+
+    Concurrency
+    -----------
+    The lookup and the insert are serialised per (session, identity): the
+    advisory lock below is keyed on both, so two ingestions of different
+    cars, or of the same car in different sessions, never wait on each
+    other, and two ingestions of the same car in one session cannot both
+    find nothing and both insert. The lock is held to the end of the
+    transaction, which is where the insert is, so the second holder reads a
+    state the first has committed.
 
     Returns the id, or None if the insert produced no row.
     """
     attrs = car_identity(number, team_id, row)
 
-    # Two ingestions of the same identity would otherwise both find nothing and
-    # both insert. The lock is held to the end of the transaction, which is
-    # where the insert is, and is taken on the identity rather than the table,
-    # so unrelated rows do not queue behind each other.
-    cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (repr(attrs),))
+    # Keyed on the session as well as the attributes: the uniqueness this
+    # protects is per session, so serialising more widely would only make
+    # unrelated ingestions queue. `normalize_teams` takes the same lock, by
+    # the same function, for the identities a merge would change.
+    lock_car_identity(cur, session_id, attrs)
 
-    # IS NOT DISTINCT FROM, not =: most of these columns are nullable, and a
-    # NULL never equals itself. This is the NULLS NOT DISTINCT semantics the
-    # competitive model uses for the same reason.
-    #
-    # ORDER BY id is for determinism, not for choosing between candidates: the
-    # rows this can match are identical in every column the loader writes, so
-    # the choice carries no information. It is not the tie-break among distinct
-    # entries that ADR 0001 forbids.
-    cur.execute(f"SELECT id FROM cars WHERE {_CAR_MATCH} ORDER BY id LIMIT 1", attrs)
-    found = cur.fetchone()
-    if found:
-        return found[0]
+    parametros = dict(zip(CAR_COLUMNS, attrs))
+    parametros["sessao"] = session_id
+    cur.execute(_CAR_IN_SESSION, parametros)
+    candidatos = cur.fetchall()
+
+    portadores = [cid for cid, carrega in candidatos if carrega]
+    if len(portadores) > 1:
+        raise CarIdentityAmbiguous(
+            f"o carro {number} da sessao {session_id} tem {len(portadores)} "
+            f"identidades iguais carregando voltas ({', '.join(map(str, portadores))}): "
+            f"escolher uma separaria o resultado das voltas da outra")
+    if portadores:
+        return portadores[0]
+    if candidatos:
+        return candidatos[0][0]      # ORDER BY c.id: o representante canonico
 
     cur.execute(_CAR_INSERT, attrs)
     inserted = cur.fetchone()
@@ -980,7 +1133,7 @@ def process_session(cur, series_key: str, sess: dict, dry_run: bool) -> dict:
 
         team_name = row.get("TEAM", "").strip() or "Unknown"
         team_id   = upsert_team(cur, team_name)
-        car_id    = upsert_car(cur, number, team_id, row, series_key)
+        car_id    = upsert_car(cur, number, team_id, row, series_key, session_id)
         if not car_id:
             continue
 
