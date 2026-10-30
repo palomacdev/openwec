@@ -279,20 +279,55 @@ def normalize_status(s: str) -> str:
 
 # ── Driver parsers ────────────────────────────────────────────
 
+# Suffixes that follow a surname instead of being one. Compared without case
+# and without the trailing dot, so "Sr.", "sr", "JR." and "Jr" all match.
+NAME_SUFFIXES = frozenset({"sr", "jr", "ii", "iii", "iv"})
+
+
+def _is_suffix(token: str) -> bool:
+    return token.rstrip(".").casefold() in NAME_SUFFIXES
+
+
 def split_wec_driver_name(full_name: str) -> tuple[str, str]:
     """
     WEC format: "Antonio FUOCO" or "Nicklas NIELSEN"
     Returns (first_name, last_name).
     Assumes last word that is all-uppercase = last name.
+
+    A trailing suffix stays with the surname. "Horst FELBERMAYR Sr." used to
+    cut at the last space and store the honorific as the surname — the
+    rehearsal of session 1007 created `Horst FELBERMAYR / Sr.` that way, and
+    session 1300's only ambiguity is the same family's `Horst FELBERMAYR Jr`.
+    A suffix is part of a name, never the whole of it.
+
+    What this deliberately does **not** change is the cut itself: "Giedo VAN
+    DER GARDE" still becomes ("Giedo VAN DER", "GARDE"). That boundary is an
+    artefact the whole project already compensates for by joining the two
+    fields before folding (`full_name_key`), and moving it here would make
+    every stored name stop matching the source that wrote it.
+
+    The published name survives: joining the two halves with a single space
+    gives back what the source printed, whitespace aside.
     """
     if not full_name or not full_name.strip():
         return ("", "")
     parts = full_name.strip().split()
     if len(parts) == 1:
         return ("", parts[0])
-    # Last part is typically UPPERCASE last name
-    last = parts[-1]
-    first = " ".join(parts[:-1])
+
+    # Peel the suffixes off the end, then take the surname from what is left.
+    fim = len(parts)
+    while fim > 1 and _is_suffix(parts[fim - 1]):
+        fim -= 1
+    sufixos = parts[fim:]
+
+    # Everything is suffix but the first token: there is no given name to
+    # separate, so the whole thing is the surname.
+    if fim == 1:
+        return ("", " ".join(parts))
+
+    last = " ".join(parts[fim - 1:fim] + sufixos)
+    first = " ".join(parts[:fim - 1])
     return (first.strip(), last.strip())
 
 
