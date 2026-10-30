@@ -235,6 +235,50 @@ def test_o_carregador_prende_o_carro_a_sessao_na_mesma_passagem():
         "insert_result afastou-se de upsert_car; a idempotencia depende do par"
 
 
+def test_a_sessao_inteira_e_uma_transacao_so():
+    """
+    A idempotencia nao e de `upsert_car`: e do par, e o par so vale enquanto
+    a transacao os mantiver juntos.
+
+    `upsert_car` so encontra o carro que a sessao ja aponta, e quem aponta e
+    `insert_result`. Comitar entre os dois deixa um carro orfao que a
+    chamada seguinte nao reencontra — comportamento medido em
+    `test_resolver_e_comitar_sem_gravar_deixa_orfao`. Por isso `process_session`
+    nao pode comitar nada: a unidade de trabalho e a sessao, e quem a fecha e
+    `run`, depois que a sessao inteira passou.
+    """
+    import ast
+
+    arvore = ast.parse(FONTE)
+    funcoes = {n.name: n for n in ast.walk(arvore)
+               if isinstance(n, ast.FunctionDef)}
+
+    def transacoes(no):
+        return sorted({f.func.attr for f in ast.walk(no)
+                       if isinstance(f, ast.Call)
+                       and isinstance(f.func, ast.Attribute)
+                       and f.func.attr in ("commit", "rollback")})
+
+    assert transacoes(funcoes["process_session"]) == [], (
+        "process_session fechou uma transacao; a sessao deixa de ser a "
+        "unidade de trabalho e o par upsert_car/insert_result se separa")
+
+    # E em `run`, o commit esta no laco das sessoes — nao no das linhas.
+    # O laco das sessoes, nao o das series que o contem: o que itera sobre
+    # `sessions`. Se o commit subisse para o de fora, uma serie inteira
+    # passaria a ser a transacao.
+    laco_das_sessoes = [
+        no for no in ast.walk(funcoes["run"])
+        if isinstance(no, ast.For)
+        and isinstance(no.iter, ast.Name) and no.iter.id == "sessions"
+    ]
+    assert len(laco_das_sessoes) == 1
+    corpo = laco_das_sessoes[0]
+    assert any(isinstance(c, ast.Call) and getattr(c.func, "id", "") ==
+               "process_session" for c in ast.walk(corpo))
+    assert "commit" in transacoes(corpo)
+
+
 def test_o_carregador_passa_a_sessao():
     corpo = FONTE.split("def process_session(", 1)[1].split("\ndef ", 1)[0]
     chamada = [l for l in corpo.splitlines() if "upsert_car(" in l]

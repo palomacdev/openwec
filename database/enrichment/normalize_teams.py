@@ -41,7 +41,9 @@ from collections import defaultdict
 
 
 from database.db import DB_CONFIG
-from database.loader.load_classification import CAR_COLUMNS, lock_car_identity
+from database.loader.load_classification import (
+    CAR_COLUMNS, try_lock_car_identity,
+)
 
 
 class FusaoRecusada(Exception):
@@ -102,9 +104,10 @@ def identidades_afetadas(cur, dup_id: int, canonical_id: int) -> list[tuple]:
     """
     As (sessao, identidade) que a fusao alteraria, em ordem determinista.
 
-    A ordem importa: duas fusoes simultaneas que tomassem os mesmos locks em
-    ordens diferentes poderiam esperar uma pela outra em circulo. Ordenar pela
-    propria chave remove isso sem coordenacao adicional.
+    A ordem e determinista para que duas fusoes simultaneas nao esperem uma
+    pela outra em circulo. Ela **nao** resolve o circulo com a ingestao, que
+    resolve as identidades na ordem do arquivo e nao tem como ordena-las:
+    contra ela, o que protege e nao esperar (`try_lock_car_identity`).
     """
     cur.execute(AFETADOS, {"dup": dup_id, "canon": canonical_id})
     return sorted((linha[0], tuple(linha[1:])) for linha in cur.fetchall())
@@ -114,6 +117,30 @@ def colisoes_internas(cur, dup_id: int, canonical_id: int) -> list[tuple]:
     """Os grupos que a fusao juntaria dentro de uma sessao. Vazio e o normal."""
     cur.execute(COLISOES, {"dup": dup_id, "canon": canonical_id})
     return [(linha[0], linha[2]) for linha in cur.fetchall()]
+
+
+def toma_a_equipe(cur, dup_id: int) -> None:
+    """
+    A linha da equipe que vai ser apagada, sem esperar por ela.
+
+    `cars.team_id` referencia `teams(id)`, entao toda ingestao que insere um
+    carro segura um KEY SHARE na linha da equipe ate comitar — e o DELETE
+    desta fusao precisa do exclusivo. Esperar por ele fecharia o segundo
+    circulo: a ingestao ja tem o KEY SHARE e vai pedir um lock consultivo que
+    a fusao segura. `MEASURED`: nessa ordem o PostgreSQL aborta a
+    **ingestao**, nao a fusao, que e o pior dos dois resultados.
+
+    Entao a fusao nao espera por nada. Ou toma tudo de imediato, ou nao
+    acontece.
+    """
+    try:
+        cur.execute("SELECT 1 FROM teams WHERE id = %s FOR UPDATE NOWAIT",
+                    (dup_id,))
+    except psycopg2.errors.LockNotAvailable as exc:
+        raise FusaoRecusada(
+            f"a equipe {dup_id} esta em uso por outra transacao; a fusao nao "
+            f"espera pela linha, para nao formar espera circular com a "
+            f"ingestao") from exc
 
 
 def _primeira_linha(erro: Exception) -> str:
@@ -271,12 +298,22 @@ def run(dry_run: bool = False) -> int:
                 # podia deixar dois carros de uma sessao indistinguiveis, que
                 # e exatamente o que o guarda recusa criar.
                 #
-                # Os locks vem primeiro e em ordem determinista: uma ingestao
-                # que esteja resolvendo qualquer uma destas identidades espera
+                # Os locks vem primeiro: uma ingestao que chegue depois espera
                 # aqui, e a checagem abaixo passa a ver um estado estavel.
+                #
+                # Mas a fusao nao espera por eles. Ela toma varios numa
+                # transacao so, e a ingestao toma os seus na ordem do arquivo:
+                # duas ordens que nao se conhecem sao uma espera circular, e o
+                # PostgreSQL ja a demonstrou com `deadlock detected`. Entao,
+                # se um lock nao esta livre, a fusao desiste.
                 for sessao, identidade in identidades_afetadas(
                         write_cur, dup_id, canonical_id):
-                    lock_car_identity(write_cur, sessao, identidade)
+                    if not try_lock_car_identity(write_cur, sessao, identidade):
+                        raise FusaoRecusada(
+                            f"a identidade do carro {identidade[0]} na sessao "
+                            f"{sessao} esta em uso por outra transacao; a "
+                            f"fusao nao espera, para nao formar espera "
+                            f"circular com a ingestao")
 
                 colisoes = colisoes_internas(write_cur, dup_id, canonical_id)
                 if colisoes:
@@ -288,6 +325,10 @@ def run(dry_run: bool = False) -> int:
                     raise FusaoRecusada(
                         f"a fusao daria a dois carros da mesma sessao uma "
                         f"identidade so — {detalhe}")
+
+                # O ultimo lock que falta, tambem sem esperar: a linha da
+                # equipe que o DELETE abaixo vai apagar.
+                toma_a_equipe(write_cur, dup_id)
 
                 # Update all cars pointing to the duplicate
                 write_cur.execute("""

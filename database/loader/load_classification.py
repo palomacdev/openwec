@@ -632,6 +632,28 @@ def lock_car_identity(cur, session_id: int, attrs: tuple) -> None:
                 (car_identity_lock_key(session_id, attrs),))
 
 
+def try_lock_car_identity(cur, session_id: int, attrs: tuple) -> bool:
+    """
+    O mesmo lock, mas sem esperar: devolve False se ja estiver tomado.
+
+    Quem toma **um** lock por vez pode esperar a vontade. Quem toma varios
+    numa transacao so pode esperar se todos concordarem na ordem, e nao ha
+    como fazer os dois lados concordarem aqui: a ingestao resolve as
+    identidades na ordem do arquivo, uma por linha, e a fusao de equipes as
+    descobre por consulta e so pode ordena-las pela chave. `MEASURED`: com
+    dois carros de uma sessao e um arquivo que os lista na ordem inversa da
+    ordenada, o PostgreSQL detecta `deadlock detected` e aborta uma das duas.
+
+    Ordenar de um lado so nao resolve, e ninguem deve esperar que resolva.
+    Quem toma varios locks usa esta funcao e **desiste** quando nao os obtem
+    todos — uma fusao que nao consegue ver um estado estavel e uma fusao que
+    nao acontece, nao uma que forca.
+    """
+    cur.execute("SELECT pg_try_advisory_xact_lock(hashtextextended(%s, 0))",
+                (car_identity_lock_key(session_id, attrs),))
+    return bool(cur.fetchone()[0])
+
+
 def car_session_scope(alias: str = "c", marcador: str = "%(sessao)s") -> str:
     """
     What it means for a car to belong to a session: the SQL, written once.

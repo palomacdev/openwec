@@ -76,6 +76,18 @@ same lock through the same function, because merging two teams rewrites
 `team_id`, which is one of the eight columns: a merge changes identities that
 an ingestion may be resolving at that moment.
 
+**The ingestion may wait; the merge may not.** An ingestion takes one lock at
+a time, in the order of the file it is reading, and it cannot sort what it
+has not read yet. A merge takes several in one transaction, and can only
+order them by key. Two orders that do not know each other are a cycle, and
+`MEASURED`: PostgreSQL reports `deadlock detected` on two such pairs — one
+between two advisory locks, one between an advisory lock and the row lock the
+`cars.team_id` foreign key takes on `teams`. The second aborted the
+*ingestion*. So the merge acquires everything without waiting —
+`pg_try_advisory_xact_lock` and `FOR UPDATE NOWAIT` — and refuses when it
+cannot. A merge that cannot see a stable state is a merge that does not
+happen.
+
 ---
 
 ## 4. What this does not decide

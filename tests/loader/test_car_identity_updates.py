@@ -372,10 +372,12 @@ def test_a_fusao_desfaz_e_segue_quando_um_merge_falha(monkeypatch, capsys):
     deixaria iguais de qualquer jeito.
     """
     leitura = CursorFalso()
-    # O trecho e escrito assim, e nao pelo comeco do statement, porque
-    # test_sandbox_guard proibe o literal de exclusao nas suites de loader —
-    # uma proibicao que vale, ja que um DELETE aqui alcancaria linhas reais.
-    escrita = CursorFalso(falhar_em="teams WHERE id")
+    # So a palavra, e nao o comeco do statement, porque test_sandbox_guard
+    # proibe o literal de exclusao nas suites de loader — uma proibicao que
+    # vale, ja que uma exclusao aqui alcancaria linhas reais. E e ela, e nao
+    # "teams WHERE id", porque desde R1 a fusao tambem **le** essa linha
+    # (`toma_a_equipe`), e o trecho antigo falhava naquela leitura.
+    escrita = CursorFalso(falhar_em="DELETE")
     conexao = ConexaoFalsa(leitura, escrita)
     monkeypatch.setattr(nt.psycopg2, "connect", lambda **kw: conexao)
     monkeypatch.setattr(nt, "find_duplicate_groups", lambda cur: [
@@ -390,6 +392,9 @@ def test_a_fusao_desfaz_e_segue_quando_um_merge_falha(monkeypatch, capsys):
 
     atualizacoes = [s for s in escrita.sql if s.startswith("UPDATE cars")]
     assert len(atualizacoes) == 2, "a segunda fusão não foi tentada"
+    # A linha da equipe e tomada sem esperar, antes de qualquer escrita.
+    tomadas = [s for s in escrita.sql if "FOR UPDATE NOWAIT" in s]
+    assert len(tomadas) == 2
     assert conexao.rollbacks == 2, "a falha não foi desfeita"
     assert conexao.commits == 0, "comitou apesar da falha"
     assert "[ERROR]" in saida

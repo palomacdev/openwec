@@ -7,9 +7,13 @@ passar pelo guarda de identidade — de modo que podia deixar dois carros de
 uma sessao indistinguiveis, que e precisamente o que o guarda recusa criar.
 `MEASURED`: **76 grupos de equipe colidem** sob dobramento em 1.111 linhas.
 
-A protecao e uma so, e e a que ja existia: `lock_car_identity`, por
-(sessao, identidade), com a chave que `car_identity_lock_key` constroi. Nao
-ha um segundo mecanismo, e ha teste afirmando isso.
+A protecao e uma so, e e a que ja existia: o lock por (sessao, identidade),
+com a chave que `car_identity_lock_key` constroi. Nao ha um segundo
+mecanismo, e ha teste afirmando isso. A fusao usa a variante que **nao
+espera**, `try_lock_car_identity`: ela toma varios locks numa transacao so,
+e a ingestao toma os seus na ordem do arquivo — duas ordens que nao se
+conhecem formam espera circular, demonstrada com `deadlock detected` antes
+de esta variante existir.
 
 O que a fusao **nao** pode fazer, e cada uma tem o seu teste aqui: criar dois
 carros de identidade equivalente na mesma sessao, separar `results` de
@@ -36,9 +40,10 @@ psycopg2 = pytest.importorskip("psycopg2")
 from tests.loader.sandbox import connect_to_sandbox  # noqa: E402
 from database.loader.load_classification import (  # noqa: E402
     CAR_COLUMNS, car_identity_lock_key, insert_result, upsert_car,
+    try_lock_car_identity,
 )
 from database.enrichment.normalize_teams import (  # noqa: E402
-    FusaoRecusada, colisoes_internas, identidades_afetadas,
+    FusaoRecusada, colisoes_internas, identidades_afetadas, toma_a_equipe,
 )
 
 FONTE_FUSAO = (RAIZ / "database" / "enrichment" /
@@ -98,9 +103,10 @@ def volta(cur, sess, car_id, n=1):
 
 def funde(cur, dup_id, canonical_id):
     """O que o laco de `normalize_teams` faz por fusao, na mesma ordem."""
-    from database.loader.load_classification import lock_car_identity
     for sess, identidade in identidades_afetadas(cur, dup_id, canonical_id):
-        lock_car_identity(cur, sess, identidade)
+        if not try_lock_car_identity(cur, sess, identidade):
+            raise FusaoRecusada(
+                f"identidade do carro {identidade[0]} da sessao {sess} em uso")
     colisoes = colisoes_internas(cur, dup_id, canonical_id)
     if colisoes:
         raise FusaoRecusada(f"colisao interna: {colisoes}")
@@ -112,7 +118,7 @@ def funde(cur, dup_id, canonical_id):
 # ── Um mecanismo so ──────────────────────────────────────────
 
 def test_a_fusao_usa_o_lock_do_carregador_e_nao_um_proprio():
-    assert "lock_car_identity" in FONTE_FUSAO
+    assert "try_lock_car_identity" in FONTE_FUSAO
     assert "from database.loader.load_classification import" in FONTE_FUSAO
     # Nenhuma chave nem lock construido a mao deste lado.
     assert "pg_advisory" not in FONTE_FUSAO
@@ -331,8 +337,7 @@ def test_falha_depois_do_update_desfaz_a_fusao_inteira(conn, sandbox):
     try:
         with conn.cursor() as cur:
             for sess, identidade in identidades_afetadas(cur, dup, canon):
-                from database.loader.load_classification import lock_car_identity
-                lock_car_identity(cur, sess, identidade)
+                assert try_lock_car_identity(cur, sess, identidade)
             assert colisoes_internas(cur, dup, canon) == []
             cur.execute("UPDATE cars SET team_id = %s WHERE team_id = %s",
                         (canon, dup))
@@ -413,8 +418,6 @@ def test_a_ingestao_espera_a_fusao_no_mesmo_lock(sandbox):
     finally:
         semente.close()
 
-    from database.loader.load_classification import lock_car_identity
-
     travou = threading.Event()      # a fusao ja tem os locks
     liberar = threading.Event()     # a fusao pode comitar
     estado: dict = {}
@@ -426,7 +429,8 @@ def test_a_ingestao_espera_a_fusao_no_mesmo_lock(sandbox):
             with c.cursor() as k:
                 k.execute("SELECT 1")
                 for sess, identidade in identidades_afetadas(k, dup, canon):
-                    lock_car_identity(k, sess, identidade)
+                    assert try_lock_car_identity(k, sess, identidade), (
+                        "nada disputava estes locks; a fusao devia obte-los")
                 travou.set()
                 liberar.wait(timeout=20)
                 k.execute("UPDATE cars SET team_id = %s WHERE team_id = %s",
@@ -588,3 +592,221 @@ def test_run_em_dry_run_nao_escreve(conn, fusao_no_sandbox):
         conn.rollback()
     finally:
         _limpa(conn, (canon, dup), (a, b))
+
+
+# ── A espera circular, e por que a fusao nao espera ──────────
+
+def test_a_fusao_desiste_em_vez_de_formar_espera_circular(sandbox):
+    """
+    O caso que o PostgreSQL ja abortou com `deadlock detected`.
+
+    A fusao ordena os locks pela chave; a ingestao os toma na ordem do
+    arquivo, e um arquivo pode listar os carros em qualquer ordem. Com dois
+    carros de uma sessao e as duas ordens invertidas, cada lado segura o lock
+    que o outro quer.
+
+    Antes de `try_lock_car_identity` isto era um deadlock: medido, com estas
+    mesmas funcoes, `DeadlockDetected` numa das duas conexoes. Agora a fusao
+    nao espera — ela recusa, e a ingestao segue.
+
+    O entrelacamento e **observado**, nao torcido: a ingestao so avanca para o
+    segundo carro depois de a fusao ter tomado o primeiro lock, e a fusao so
+    tenta o segundo depois de a ingestao ter tomado o seu.
+    """
+    semente = connect_to_sandbox(sandbox)
+    try:
+        with semente.cursor() as c:
+            canon, dup = equipe(c, "CANON DL"), equipe(c, "DUP DL")
+            s = sessao(c, "zz_r1_dl")
+            ingere(c, s, "1", dup)
+            ingere(c, s, "2", dup)
+        semente.commit()
+    finally:
+        semente.close()
+
+    espia = connect_to_sandbox(sandbox)
+    try:
+        with espia.cursor() as k:
+            ordem_da_fusao = identidades_afetadas(k, dup, canon)
+    finally:
+        espia.rollback()
+        espia.close()
+
+    numeros = [identidade[0] for _, identidade in ordem_da_fusao]
+    assert numeros == ["1", "2"], (
+        f"a fusao ordena pela chave; esperava ['1','2'] e vi {numeros}")
+    # A ingestao faz o inverso, que e o que um arquivo com o 2 listado
+    # primeiro produz. E o unico ingrediente que falta para o circulo.
+    ordem_da_ingestao = ["2", "1"]
+
+    ingestao_tem_o_seu = threading.Event()
+    fusao_tem_o_seu = threading.Event()
+    estado: dict = {}
+
+    def ingere_em_ordem_de_arquivo():
+        c = connect_to_sandbox(sandbox)
+        try:
+            with c.cursor() as k:
+                upsert_car(k, ordem_da_ingestao[0], canon,
+                           linha_de(NUMBER=ordem_da_ingestao[0]), "ELMS", s)
+                ingestao_tem_o_seu.set()
+                fusao_tem_o_seu.wait(timeout=20)
+                upsert_car(k, ordem_da_ingestao[1], canon,
+                           linha_de(NUMBER=ordem_da_ingestao[1]), "ELMS", s)
+            estado["ingestao"] = "concluiu"
+            c.rollback()
+        except Exception as exc:                          # noqa: BLE001
+            estado["ingestao"] = exc
+            c.rollback()
+        finally:
+            c.close()
+
+    def funde_em_ordem_de_chave():
+        c = connect_to_sandbox(sandbox)
+        try:
+            with c.cursor() as k:
+                sess, identidade = ordem_da_fusao[0]
+                assert try_lock_car_identity(k, sess, identidade)
+                fusao_tem_o_seu.set()
+                ingestao_tem_o_seu.wait(timeout=20)
+                for sess, identidade in ordem_da_fusao[1:]:
+                    if not try_lock_car_identity(k, sess, identidade):
+                        raise FusaoRecusada(
+                            f"identidade do carro {identidade[0]} em uso")
+            estado["fusao"] = "concluiu"
+            c.rollback()
+        except Exception as exc:                          # noqa: BLE001
+            estado["fusao"] = exc
+            c.rollback()
+        finally:
+            c.close()
+
+    fios = [threading.Thread(target=ingere_em_ordem_de_arquivo),
+            threading.Thread(target=funde_em_ordem_de_chave)]
+    for f in fios:
+        f.start()
+    for f in fios:
+        f.join(timeout=60)
+
+    limpeza = connect_to_sandbox(sandbox)
+    limpeza.autocommit = True
+    try:
+        with limpeza.cursor() as k:       # nao ha DELETE em public
+            k.execute("DELETE FROM results WHERE session_id = %s", (s,))
+            k.execute("DELETE FROM cars WHERE team_id IN (%s, %s)", (dup, canon))
+            k.execute("DELETE FROM sessions WHERE id = %s", (s,))
+            k.execute("DELETE FROM teams WHERE id IN (%s, %s)", (dup, canon))
+    finally:
+        limpeza.close()
+
+    assert not any(f.is_alive() for f in fios), "alguem ficou preso no lock"
+
+    for lado in ("ingestao", "fusao"):
+        assert "deadlock" not in str(estado.get(lado, "")).lower(), (
+            f"{lado}: o PostgreSQL ainda detecta espera circular — "
+            f"{estado[lado]}")
+
+    assert estado["ingestao"] == "concluiu", (
+        f"a ingestao nao devia ser a sacrificada: {estado['ingestao']}")
+    assert isinstance(estado["fusao"], FusaoRecusada), (
+        f"a fusao devia recusar por disputa, e deu {estado['fusao']!r}")
+
+
+def test_a_fusao_nao_espera_pela_linha_da_equipe(sandbox):
+    """
+    O segundo circulo, e o unico que sacrificava a ingestao.
+
+    `cars.team_id` referencia `teams(id)`: toda ingestao que insere um carro
+    segura um KEY SHARE na linha da equipe ate comitar. A fusao apaga essa
+    linha. Se ela esperasse, teriamos ingestao com o KEY SHARE pedindo um
+    lock consultivo que a fusao segura, e fusao com os consultivos pedindo a
+    linha — `MEASURED`: o PostgreSQL abortava a **ingestao**.
+
+    O sandbox do carregador nao copia chaves estrangeiras de proposito, entao
+    este teste cria a sua, `NOT VALID` para nao reexaminar linhas de outros
+    testes, e a derruba no fim.
+    """
+    semente = connect_to_sandbox(sandbox)
+    try:
+        with semente.cursor() as c:
+            c.execute("ALTER TABLE cars ADD CONSTRAINT zz_fk_equipe "
+                      "FOREIGN KEY (team_id) REFERENCES teams(id) NOT VALID")
+            canon, dup = equipe(c, "CANON FK"), equipe(c, "DUP FK")
+            s = sessao(c, "zz_r1_fk")
+            ingere(c, s, "1", dup)
+        semente.commit()
+    finally:
+        semente.close()
+
+    tem_a_equipe = threading.Event()       # a ingestao segura o KEY SHARE
+    fusao_passou_do_update = threading.Event()
+    estado: dict = {}
+
+    def ingere_sob_a_duplicada():
+        c = connect_to_sandbox(sandbox)
+        try:
+            with c.cursor() as k:
+                # Identidade que a fusao **nao** tranca — a equipe ainda e a
+                # duplicada —, mas que segura a linha dela pela chave.
+                upsert_car(k, "9", dup, linha_de(NUMBER="9"), "ELMS", s)
+                tem_a_equipe.set()
+                fusao_passou_do_update.wait(timeout=20)
+                # E agora uma que a fusao tranca.
+                upsert_car(k, "1", canon, linha_de(NUMBER="1"), "ELMS", s)
+            estado["ingestao"] = "concluiu"
+            c.rollback()
+        except Exception as exc:                          # noqa: BLE001
+            estado["ingestao"] = exc
+            c.rollback()
+        finally:
+            c.close()
+
+    def funde():
+        c = connect_to_sandbox(sandbox)
+        try:
+            with c.cursor() as k:
+                assert tem_a_equipe.wait(timeout=20)
+                for sess, identidade in identidades_afetadas(k, dup, canon):
+                    assert try_lock_car_identity(k, sess, identidade)
+                toma_a_equipe(k, dup)
+                k.execute("UPDATE cars SET team_id = %s WHERE team_id = %s",
+                          (canon, dup))
+                fusao_passou_do_update.set()
+                k.execute("DELETE FROM teams WHERE id = %s", (dup,))
+            estado["fusao"] = "concluiu"
+            c.rollback()
+        except Exception as exc:                          # noqa: BLE001
+            estado["fusao"] = exc
+            fusao_passou_do_update.set()
+            c.rollback()
+        finally:
+            c.close()
+
+    fios = [threading.Thread(target=ingere_sob_a_duplicada),
+            threading.Thread(target=funde)]
+    for f in fios:
+        f.start()
+    for f in fios:
+        f.join(timeout=60)
+
+    limpeza = connect_to_sandbox(sandbox)
+    limpeza.autocommit = True
+    try:
+        with limpeza.cursor() as k:       # nao ha DELETE em public
+            k.execute("DELETE FROM results WHERE session_id = %s", (s,))
+            k.execute("DELETE FROM cars WHERE team_id IN (%s, %s)", (dup, canon))
+            k.execute("DELETE FROM sessions WHERE id = %s", (s,))
+            k.execute("DELETE FROM teams WHERE id IN (%s, %s)", (dup, canon))
+            k.execute("ALTER TABLE cars DROP CONSTRAINT zz_fk_equipe")
+    finally:
+        limpeza.close()
+
+    assert not any(f.is_alive() for f in fios), "alguem ficou preso"
+    for lado in ("ingestao", "fusao"):
+        assert "deadlock" not in str(estado.get(lado, "")).lower(), (
+            f"{lado}: espera circular entre lock consultivo e chave "
+            f"estrangeira — {estado[lado]}")
+    assert estado["ingestao"] == "concluiu", (
+        f"a ingestao era quem o deadlock sacrificava: {estado['ingestao']}")
+    assert isinstance(estado["fusao"], FusaoRecusada), (
+        f"a fusao devia recusar a linha em uso, e deu {estado['fusao']!r}")
