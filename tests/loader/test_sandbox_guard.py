@@ -113,7 +113,7 @@ def test_o_sandbox_cobre_as_tabelas_que_o_loader_escreve():
     """
     assert set(SANDBOX_TABLES) == {"series", "seasons", "events", "teams",
                                    "drivers", "sessions", "cars", "results",
-                                   "ingest_log"}
+                                   "laps", "ingest_log"}
 
 
 def test_a_limpeza_nao_e_por_delete():
@@ -128,5 +128,8 @@ def test_a_limpeza_nao_e_por_delete():
         assert "DELETE FROM" not in texto.upper() or "nao ha DELETE" in texto, (
             f"{arquivo.name} voltou a apagar linhas"
         )
-    conftest = (aqui / "conftest.py").read_text(encoding="utf-8")
-    assert "DROP SCHEMA" in conftest
+    # A fixture mudou de arquivo em R2-B — `tests/recovery` precisa da mesma —,
+    # e a limpeza continua sendo DROP SCHEMA CASCADE, agora em sandbox.py.
+    fixture = (aqui / "sandbox.py").read_text(encoding="utf-8")
+    assert "DROP SCHEMA" in fixture
+    assert "DROP SCHEMA" not in (aqui / "conftest.py").read_text(encoding="utf-8")

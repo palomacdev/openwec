@@ -156,12 +156,18 @@ def test_varios_carros_de_zero_voltas_sao_admitidos_juntos():
 # ── Identity for the admitted car ────────────────────────────
 
 def identidade(car_id: int | None, team_id: int = 7) -> list:
-    """The answers upsert_team and upsert_car consume, in order."""
+    """
+    The answers upsert_team and upsert_car consume, in order.
+
+    Since R2-B the car lookup is scoped by session and answers two columns —
+    the id and whether that car already carries this session's laps. A
+    zero-lap car never carries one, so the flag is always False here.
+    """
     respostas = [[(team_id,)], []]            # team insert, advisory lock
     if car_id is None:
         respostas += [[], [(99,)]]            # lookup misses, insert returns
     else:
-        respostas += [[(car_id,)]]            # lookup finds
+        respostas += [[(car_id, False)]]      # lookup finds, sem voltas
     return respostas
 
 
@@ -169,7 +175,7 @@ def test_o_carro_admitido_ganha_identidade():
     cur = CursorFalso(identidade(None))
     plano = Plan(matched={"3": 10}, zero_lap=["47"])
     resolvidos = assert_zero_lap_identity(
-        cur, plano, {"47": carro("47", TEAM="Lanan Racing")}, "ELMS")
+        cur, plano, {"47": carro("47", TEAM="Lanan Racing")}, "ELMS", 2226)
     assert resolvidos == {"47": 99}
     assert "INSERT INTO cars" in cur.sql
 
@@ -179,7 +185,7 @@ def test_a_identidade_existente_e_reaproveitada():
     cur = CursorFalso(identidade(99))
     resolvidos = assert_zero_lap_identity(
         cur, Plan(matched={"3": 10}, zero_lap=["47"]),
-        {"47": carro("47", TEAM="Lanan Racing")}, "ELMS")
+        {"47": carro("47", TEAM="Lanan Racing")}, "ELMS", 2226)
     assert resolvidos == {"47": 99}
     assert "INSERT INTO cars" not in cur.sql
 
@@ -196,7 +202,7 @@ def test_a_identidade_que_colide_com_um_pareado_e_recusada():
     with pytest.raises(RecoveryBlocked) as exc:
         assert_zero_lap_identity(
             cur, Plan(matched={"3": 10}, zero_lap=["47"]),
-            {"47": carro("47", TEAM="Lanan Racing")}, "ELMS")
+            {"47": carro("47", TEAM="Lanan Racing")}, "ELMS", 2226)
     assert "mesma identidade" in str(exc.value)
 
 
@@ -204,14 +210,33 @@ def test_sem_identidade_possivel_a_recuperacao_para():
     cur = CursorFalso([[(7,)], [], [], []])   # insert devolve nada
     with pytest.raises(RecoveryBlocked) as exc:
         assert_zero_lap_identity(
-            cur, Plan(zero_lap=["47"]), {"47": carro("47")}, "ELMS")
+            cur, Plan(zero_lap=["47"]), {"47": carro("47")}, "ELMS", 2226)
     assert "identidade criada" in str(exc.value)
 
 
 def test_sem_carros_de_zero_voltas_nada_e_consultado():
     cur = CursorFalso()
-    assert assert_zero_lap_identity(cur, Plan(matched={"3": 10}), {}, "ELMS") == {}
+    assert assert_zero_lap_identity(
+        cur, Plan(matched={"3": 10}), {}, "ELMS", 2226) == {}
     assert cur.executados == []
+
+
+def test_a_busca_do_carro_de_zero_voltas_e_escopada_pela_sessao():
+    """
+    The lookup names the session, and names it as the only scope: a car of
+    another session can never answer it, whatever its attributes.
+    """
+    cur = CursorFalso(identidade(99))
+    assert_zero_lap_identity(
+        cur, Plan(matched={"3": 10}, zero_lap=["47"]),
+        {"47": carro("47", TEAM="Lanan Racing")}, "ELMS", 2226)
+
+    busca = [(s, p) for s, p in cur.executados if "FROM cars c" in s]
+    assert len(busca) == 1
+    sql, params = busca[0]
+    assert "r.session_id = %(sessao)s" in sql
+    assert "l.session_id = %(sessao)s" in sql
+    assert params["sessao"] == 2226
 
 
 # ── The write path ───────────────────────────────────────────

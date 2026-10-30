@@ -387,14 +387,16 @@ def plan_recovery(cur, session_id: int, rows: list[dict]) -> Plan:
 
 
 def assert_zero_lap_identity(cur, plan: Plan, por_numero: dict[str, dict],
-                             series_key: str) -> dict[str, int]:
+                             series_key: str, session_id: int) -> dict[str, int]:
     """
     A car for each admitted zero-lap number, or a refusal.
 
     `upsert_car` looks the identity up before inserting, on every column the
-    loader writes, so a second run of the same recovery finds the row the
-    first one made. What this adds is the check that the identity it lands on
-    is not already in use by this session: a zero-lap car that resolved to a
+    loader writes **and within this session**, so a second run of the same
+    recovery finds the row the first one made, and no run can land on a car
+    that belongs to another session. What this adds is the check that the
+    identity it lands on is not already in use by this session: a zero-lap
+    car that resolved to a
     car already carrying one of the session's matched results would be two
     published rows on one `car_id`, and `results` is keyed on that.
     """
@@ -405,7 +407,7 @@ def assert_zero_lap_identity(cur, plan: Plan, por_numero: dict[str, dict],
         row = por_numero[numero]
         equipe = field(row, "TEAM") or "Unknown"
         team_id = upsert_team(cur, equipe)
-        car_id = upsert_car(cur, numero, team_id, row, series_key)
+        car_id = upsert_car(cur, numero, team_id, row, series_key, session_id)
         if car_id is None:
             raise RecoveryBlocked(
                 f"o carro {numero}, sem voltas, nao pode ter identidade criada")
@@ -552,7 +554,8 @@ def recover_session(cur, session_id: int, rows: list[dict], series_key: str,
     # car has no lap to protect it: if its id were not in `keep`, the second
     # run would delete the result the first one wrote and mint a new car for
     # it, which is the churn this routine exists to avoid.
-    sem_voltas = assert_zero_lap_identity(cur, plan, por_numero, series_key)
+    sem_voltas = assert_zero_lap_identity(cur, plan, por_numero, series_key,
+                                          session_id)
     identidades = {**plan.matched, **sem_voltas}
     keep = sorted(identidades.values())
 

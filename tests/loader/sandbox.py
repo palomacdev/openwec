@@ -21,6 +21,7 @@ the end. There is no delete to get wrong, because there is nothing to keep.
 from __future__ import annotations
 
 import os
+import uuid
 from pathlib import Path
 
 import pytest
@@ -52,8 +53,15 @@ FIXTURE_CEILING = {"results": 1_000, "laps": 1_000, "cars": 1_000}
 # ingest_log is written by the loader and read by nothing else here; it is
 # mirrored so the provenance suite can exercise the real UNIQUE (source_url)
 # instead of restating it.
+#
+# laps is here since R2-B. The loader does not write it, but `upsert_car` now
+# reads it — entre candidatos identicos, quem decide e o portador das voltas
+# **desta** sessao — e um teste que precisa de uma volta tem de a criar. Sem o
+# espelho, esse INSERT resolveria por search_path para `public.laps`, que e
+# justamente o que `historical_counts` vigia; a suite falharia ao sair, o que
+# e o guarda funcionando, e nao uma razao para escrever la.
 SANDBOX_TABLES = ("series", "seasons", "events", "teams", "drivers",
-                  "sessions", "cars", "results", "ingest_log")
+                  "sessions", "cars", "results", "laps", "ingest_log")
 
 
 def declared_disposable() -> bool:
@@ -106,3 +114,59 @@ def connect_to_sandbox(sandbox: dict):
 
 
 RAW = Path(__file__).resolve().parents[2] / "raw"
+
+
+@pytest.fixture(scope="module")
+def sandbox():
+    """
+    A schema of this module's own, dropped whole when the module ends.
+
+    Yields a dict with the schema name, the connection settings, and the
+    `public` row counts taken on entry, so a test can assert that nothing
+    outside the sandbox moved.
+    """
+    psycopg2 = pytest.importorskip("psycopg2")
+
+    if not declared_disposable():
+        pytest.skip(
+            f"{DISPOSABLE_ENV} nao definido: esta suite escreve no banco e so "
+            "roda onde ele foi declarado descartavel"
+        )
+
+    try:
+        conn = psycopg2.connect(connect_timeout=5, **DB)
+    except psycopg2.OperationalError as exc:
+        pytest.skip(f"sem banco em {DB['host']}:{DB['port']} — {exc}")
+
+    conn.autocommit = True
+    nome = f"openwec_sandbox_{uuid.uuid4().hex[:12]}"
+    try:
+        with conn.cursor() as cur:
+            antes = historical_counts(cur)
+            motivo = refusal(antes)
+            if motivo:
+                pytest.skip(f"recusado: {motivo}")
+
+            cur.execute(f'CREATE SCHEMA "{nome}"')
+            for tabela in SANDBOX_TABLES:
+                cur.execute(f'CREATE SEQUENCE "{nome}".{tabela}_id_seq')
+                cur.execute(
+                    f'CREATE TABLE "{nome}".{tabela} '
+                    f"(LIKE public.{tabela} INCLUDING DEFAULTS "
+                    f"INCLUDING CONSTRAINTS INCLUDING INDEXES)"
+                )
+                cur.execute(
+                    f'ALTER TABLE "{nome}".{tabela} '
+                    f"ALTER COLUMN id SET DEFAULT nextval('\"{nome}\".{tabela}_id_seq')"
+                )
+
+        yield {"schema": nome, "db": dict(DB), "public_antes": antes}
+
+    finally:
+        with conn.cursor() as cur:
+            cur.execute(f'DROP SCHEMA IF EXISTS "{nome}" CASCADE')
+            depois = historical_counts(cur)
+        conn.close()
+        assert depois == antes, (
+            f"a suite alterou tabelas de public: antes {antes}, depois {depois}"
+        )

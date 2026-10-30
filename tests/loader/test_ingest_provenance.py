@@ -141,7 +141,7 @@ def cenario(cur):
 
 def test_a_carga_grava_a_origem_em_cada_resultado(cur, cenario):
     equipe, sessao = cenario
-    car_id = upsert_car(cur, "4", equipe, linha_de(), "ELMS")
+    car_id = upsert_car(cur, "4", equipe, linha_de(), "ELMS", sessao)
     insert_result(cur, sessao, car_id, linha_de(), FONTE)
 
     cur.execute("SELECT source_url FROM results WHERE session_id = %s", (sessao,))
@@ -154,7 +154,7 @@ def test_sem_origem_declarada_a_coluna_fica_nula(cur, cenario):
     como hoje. Esta PR nao atravessa a proveniencia por aquele caminho.
     """
     equipe, sessao = cenario
-    car_id = upsert_car(cur, "9", equipe, linha_de(NUMBER="9"), "ELMS")
+    car_id = upsert_car(cur, "9", equipe, linha_de(NUMBER="9"), "ELMS", sessao)
     insert_result(cur, sessao, car_id, linha_de(NUMBER="9"))
 
     cur.execute("SELECT source_url FROM results WHERE car_id = %s", (car_id,))
@@ -167,7 +167,7 @@ def test_reingestao_de_outro_arquivo_corrige_a_origem(cur, cenario):
     delas: uma linha nao pode ficar apontando para o arquivo anterior.
     """
     equipe, sessao = cenario
-    car_id = upsert_car(cur, "4", equipe, linha_de(), "ELMS")
+    car_id = upsert_car(cur, "4", equipe, linha_de(), "ELMS", sessao)
     insert_result(cur, sessao, car_id, linha_de(), FONTE)
     insert_result(cur, sessao, car_id, linha_de(), OUTRA_FONTE)
 
@@ -183,7 +183,7 @@ def test_rows_loaded_e_o_que_ficou_na_tabela(cur, cenario):
     gravadas = 0
     for numero in ("4", "22", "31"):
         row = linha_de(NUMBER=numero)
-        car_id = upsert_car(cur, numero, equipe, row, "ELMS")
+        car_id = upsert_car(cur, numero, equipe, row, "ELMS", sessao)
         if insert_result(cur, sessao, car_id, row, FONTE) is not None:
             gravadas += 1
     record_ingestions(cur, [("ELMS", FONTE, "success", gravadas, None)])
@@ -201,7 +201,7 @@ def test_reprocessar_o_arquivo_atualiza_o_registro_em_vez_de_duplicar(cur, cenar
     """
     equipe, sessao = cenario
     for _ in range(3):
-        car_id = upsert_car(cur, "4", equipe, linha_de(), "ELMS")
+        car_id = upsert_car(cur, "4", equipe, linha_de(), "ELMS", sessao)
         insert_result(cur, sessao, car_id, linha_de(), FONTE)
         record_ingestions(cur, [("ELMS", FONTE, "success", 1, None)])
 
@@ -308,7 +308,7 @@ def test_a_sessao_e_a_unidade_transacional(sandbox, monkeypatch, capsys):
         gravadas = 0
         for numero in ("4", "22"):
             row = linha_de(NUMBER=numero, TEAM="EQUIPE AB")
-            car_id = upsert_car(cur, numero, equipe, row, series_key)
+            car_id = upsert_car(cur, numero, equipe, row, series_key, sess["sessao"])
             if insert_result(cur, sess["sessao"], car_id, row,
                              provenance_of(sess["csv_path"])) is not None:
                 gravadas += 1
@@ -420,7 +420,7 @@ def test_falha_ao_gravar_o_log_nao_contamina_a_proxima_sessao(
 
     def carrega(cur, series_key, sess, dry_run):
         row = linha_de(NUMBER="31", TEAM="EQUIPE LOG")
-        car_id = upsert_car(cur, "31", equipe, row, series_key)
+        car_id = upsert_car(cur, "31", equipe, row, series_key, sess["sessao"])
         insert_result(cur, sess["sessao"], car_id, row,
                       provenance_of(sess["csv_path"]))
         if sess["falhar"]:
