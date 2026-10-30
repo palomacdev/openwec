@@ -83,10 +83,12 @@ order them by key. Two orders that do not know each other are a cycle, and
 `MEASURED`: PostgreSQL reports `deadlock detected` on two such pairs — one
 between two advisory locks, one between an advisory lock and the row lock the
 `cars.team_id` foreign key takes on `teams`. The second aborted the
-*ingestion*. So the merge acquires everything without waiting —
-`pg_try_advisory_xact_lock` and `FOR UPDATE NOWAIT` — and refuses when it
-cannot. A merge that cannot see a stable state is a merge that does not
-happen.
+*ingestion*. So the merge acquires everything without waiting: the
+identities with `pg_try_advisory_xact_lock`, and then — before its first
+write — both team rows and every car row it will rewrite, with
+`FOR UPDATE NOWAIT`. Nothing it does afterwards can block, which is the
+property that keeps it out of any cycle, whatever the other side does.
+A merge that cannot see a stable state is a merge that does not happen.
 
 ---
 

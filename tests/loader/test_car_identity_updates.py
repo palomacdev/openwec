@@ -392,9 +392,12 @@ def test_a_fusao_desfaz_e_segue_quando_um_merge_falha(monkeypatch, capsys):
 
     atualizacoes = [s for s in escrita.sql if s.startswith("UPDATE cars")]
     assert len(atualizacoes) == 2, "a segunda fusão não foi tentada"
-    # A linha da equipe e tomada sem esperar, antes de qualquer escrita.
+    # As linhas sao tomadas sem esperar, antes de qualquer escrita: as duas
+    # equipes e os carros da duplicada, em cada uma das duas fusoes.
     tomadas = [s for s in escrita.sql if "FOR UPDATE NOWAIT" in s]
-    assert len(tomadas) == 2
+    assert len(tomadas) == 4
+    assert sum("FROM teams" in s for s in tomadas) == 2
+    assert sum("FROM cars" in s for s in tomadas) == 2
     assert conexao.rollbacks == 2, "a falha não foi desfeita"
     assert conexao.commits == 0, "comitou apesar da falha"
     assert "[ERROR]" in saida

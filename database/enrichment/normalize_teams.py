@@ -119,28 +119,45 @@ def colisoes_internas(cur, dup_id: int, canonical_id: int) -> list[tuple]:
     return [(linha[0], linha[2]) for linha in cur.fetchall()]
 
 
-def toma_a_equipe(cur, dup_id: int) -> None:
+def toma_as_linhas(cur, dup_id: int, canonical_id: int) -> None:
     """
-    A linha da equipe que vai ser apagada, sem esperar por ela.
+    Todas as linhas que a fusao vai escrever ou depender, sem esperar por
+    nenhuma.
 
-    `cars.team_id` referencia `teams(id)`, entao toda ingestao que insere um
-    carro segura um KEY SHARE na linha da equipe ate comitar — e o DELETE
-    desta fusao precisa do exclusivo. Esperar por ele fecharia o segundo
-    circulo: a ingestao ja tem o KEY SHARE e vai pedir um lock consultivo que
-    a fusao segura. `MEASURED`: nessa ordem o PostgreSQL aborta a
-    **ingestao**, nao a fusao, que e o pior dos dois resultados.
+    Sao tres grupos, e nenhum deles e opcional:
 
-    Entao a fusao nao espera por nada. Ou toma tudo de imediato, ou nao
-    acontece.
+    * **as duas equipes.** `cars.team_id` referencia `teams(id)`, entao toda
+      ingestao que insere um carro segura um KEY SHARE na linha da equipe ate
+      comitar — e o DELETE desta fusao precisa do exclusivo. A canonica entra
+      junto porque o UPDATE abaixo tambem pede KEY SHARE nela, ao apontar os
+      carros para la.
+    * **os carros da equipe duplicada**, que o UPDATE vai reescrever. Nao sao
+      so a ingestao que os toca: o recuperador tem tres escritas em `cars`
+      (`fill_car_gaps`, `team_to_fill` e a remocao das linhas em forma de
+      travessia), e qualquer uma delas segura a linha ate comitar.
+
+    Esperar por qualquer um deles fecha um circulo, porque a ingestao e o
+    recuperador tomam o lock consultivo **antes** de tocar a linha, e esta
+    rotina faz o inverso. `MEASURED`: com a chave estrangeira no meio o
+    PostgreSQL aborta a **ingestao**, nao a fusao — o pior dos dois
+    resultados.
+
+    Entao a fusao nao espera por nada: ou toma tudo de imediato, ou nao
+    acontece. A ordem e determinista para o caso de duas fusoes simultaneas,
+    mas e com NOWAIT que a propriedade se sustenta — quem nunca espera nunca
+    entra num ciclo.
     """
     try:
-        cur.execute("SELECT 1 FROM teams WHERE id = %s FOR UPDATE NOWAIT",
-                    (dup_id,))
+        cur.execute("SELECT 1 FROM teams WHERE id = ANY(%s) ORDER BY id "
+                    "FOR UPDATE NOWAIT", ([dup_id, canonical_id],))
+        cur.execute("SELECT 1 FROM cars WHERE team_id = %s ORDER BY id "
+                    "FOR UPDATE NOWAIT", (dup_id,))
     except psycopg2.errors.LockNotAvailable as exc:
         raise FusaoRecusada(
-            f"a equipe {dup_id} esta em uso por outra transacao; a fusao nao "
-            f"espera pela linha, para nao formar espera circular com a "
-            f"ingestao") from exc
+            f"uma linha de teams({dup_id}, {canonical_id}) ou de cars esta em "
+            f"uso por outra transacao; a fusao nao espera por linha, para nao "
+            f"formar espera circular com a ingestao ou com o recuperador"
+        ) from exc
 
 
 def _primeira_linha(erro: Exception) -> str:
@@ -326,9 +343,11 @@ def run(dry_run: bool = False) -> int:
                         f"a fusao daria a dois carros da mesma sessao uma "
                         f"identidade so — {detalhe}")
 
-                # O ultimo lock que falta, tambem sem esperar: a linha da
-                # equipe que o DELETE abaixo vai apagar.
-                toma_a_equipe(write_cur, dup_id)
+                # Os locks de linha que faltam, tambem sem esperar: as duas
+                # equipes e os carros que o UPDATE abaixo reescreve. Depois
+                # daqui a fusao nao pede mais nada — nada do que ela faz pode
+                # bloquear.
+                toma_as_linhas(write_cur, dup_id, canonical_id)
 
                 # Update all cars pointing to the duplicate
                 write_cur.execute("""

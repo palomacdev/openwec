@@ -43,7 +43,7 @@ from database.loader.load_classification import (  # noqa: E402
     try_lock_car_identity,
 )
 from database.enrichment.normalize_teams import (  # noqa: E402
-    FusaoRecusada, colisoes_internas, identidades_afetadas, toma_a_equipe,
+    FusaoRecusada, colisoes_internas, identidades_afetadas, toma_as_linhas,
 )
 
 FONTE_FUSAO = (RAIZ / "database" / "enrichment" /
@@ -768,7 +768,7 @@ def test_a_fusao_nao_espera_pela_linha_da_equipe(sandbox):
                 assert tem_a_equipe.wait(timeout=20)
                 for sess, identidade in identidades_afetadas(k, dup, canon):
                     assert try_lock_car_identity(k, sess, identidade)
-                toma_a_equipe(k, dup)
+                toma_as_linhas(k, dup, canon)
                 k.execute("UPDATE cars SET team_id = %s WHERE team_id = %s",
                           (canon, dup))
                 fusao_passou_do_update.set()
@@ -810,3 +810,79 @@ def test_a_fusao_nao_espera_pela_linha_da_equipe(sandbox):
         f"a ingestao era quem o deadlock sacrificava: {estado['ingestao']}")
     assert isinstance(estado["fusao"], FusaoRecusada), (
         f"a fusao devia recusar a linha em uso, e deu {estado['fusao']!r}")
+
+
+def test_a_fusao_nao_espera_pela_linha_do_carro(sandbox):
+    """
+    O terceiro grupo de locks: os carros que o UPDATE reescreve.
+
+    A ingestao so insere carros, nunca os atualiza — mas o recuperador os
+    atualiza em tres lugares, e segura a linha ate comitar. Se a fusao
+    esperasse por ela, bastaria que o mesmo processo pedisse depois um lock
+    consultivo que a fusao segura.
+
+    Aqui o outro lado e um `UPDATE cars` qualquer, que e o que todos esses
+    caminhos fazem. A fusao tem de recusar, nao esperar.
+    """
+    semente = connect_to_sandbox(sandbox)
+    try:
+        with semente.cursor() as c:
+            canon, dup = equipe(c, "CANON LINHA"), equipe(c, "DUP LINHA")
+            s = sessao(c, "zz_r1_linha")
+            carro = ingere(c, s, "7", dup)
+        semente.commit()
+    finally:
+        semente.close()
+
+    outro = connect_to_sandbox(sandbox)
+    try:
+        with outro.cursor() as k:
+            # Exatamente o que `fill_car_gaps` faz: escreve um atributo e
+            # segura a linha ate comitar.
+            k.execute("UPDATE cars SET vehicle = %s WHERE id = %s",
+                      ("Oreca 03", carro))
+
+        fusao = connect_to_sandbox(sandbox)
+        try:
+            with fusao.cursor() as k:
+                for sess, identidade in identidades_afetadas(k, dup, canon):
+                    assert try_lock_car_identity(k, sess, identidade)
+                with pytest.raises(FusaoRecusada, match="nao espera por linha"):
+                    toma_as_linhas(k, dup, canon)
+        finally:
+            fusao.rollback()
+            fusao.close()
+    finally:
+        outro.rollback()
+        outro.close()
+
+    limpeza = connect_to_sandbox(sandbox)
+    limpeza.autocommit = True
+    try:
+        with limpeza.cursor() as k:       # nao ha DELETE em public
+            k.execute("SELECT team_id FROM cars WHERE id = %s", (carro,))
+            assert k.fetchone()[0] == dup, "a fusao recusada nao moveu o carro"
+            k.execute("DELETE FROM results WHERE session_id = %s", (s,))
+            k.execute("DELETE FROM cars WHERE team_id IN (%s, %s)", (dup, canon))
+            k.execute("DELETE FROM sessions WHERE id = %s", (s,))
+            k.execute("DELETE FROM teams WHERE id IN (%s, %s)", (dup, canon))
+    finally:
+        limpeza.close()
+
+
+def test_toda_recusa_acontece_antes_de_qualquer_escrita():
+    """
+    A garantia que torna o rollback de uma recusa trivial: no laco de `run`,
+    as tres recusas possiveis — disputa consultiva, colisao interna e linha
+    em uso — ficam **antes** do primeiro UPDATE. Uma fusao recusada nao tem
+    o que desfazer.
+    """
+    corpo = FONTE_FUSAO.split("for dup in g[\"duplicates\"]:", 1)[1]
+    corpo = corpo.split("except Exception as falha:", 1)[0]
+
+    primeira_escrita = corpo.index("UPDATE cars SET team_id")
+    for marca in ("try_lock_car_identity", "colisoes_internas",
+                  "toma_as_linhas"):
+        assert corpo.index(marca) < primeira_escrita, (
+            f"{marca} passou a acontecer depois da primeira escrita")
+    assert corpo.index("DELETE FROM teams") > primeira_escrita
