@@ -41,6 +41,79 @@ from collections import defaultdict
 
 
 from database.db import DB_CONFIG
+from database.loader.load_classification import CAR_COLUMNS, lock_car_identity
+
+
+class FusaoRecusada(Exception):
+    """A fusao criaria identidade concorrente dentro de uma sessao."""
+
+
+# As colunas da identidade, com `team_id` ja remapeado para o canonico. E a
+# identidade que o carro **passaria a ter**, que e a que pode colidir.
+_IDENTIDADE_POS_FUSAO = ", ".join(
+    "%(canon)s::int" if coluna == "team_id" else f"c.{coluna}"
+    for coluna in CAR_COLUMNS
+)
+
+# Toda sessao que aponta para um carro da equipe duplicada, por resultado ou
+# por volta. E o mesmo criterio de pertencimento que `car_session_scope` usa
+# no carregador e no guarda de identidade.
+AFETADOS = f"""
+    SELECT DISTINCT s.session_id, {_IDENTIDADE_POS_FUSAO}
+      FROM cars c
+      JOIN LATERAL (
+            SELECT r.session_id FROM results r WHERE r.car_id = c.id
+             UNION
+            SELECT l.session_id FROM laps    l WHERE l.car_id = c.id
+           ) s ON TRUE
+     WHERE c.team_id = %(dup)s
+"""
+
+# Uma colisao interna: dois carros distintos da mesma sessao que, **depois**
+# da fusao, carregariam a mesma identidade — e que antes dela nao carregavam,
+# porque apontavam para equipes diferentes.
+#
+# A ultima condicao e o que separa o que a fusao cria do que ja existia. Dois
+# carros que ja estavam os dois na equipe duplicada ja colidiam antes; a
+# fusao nao e responsavel por eles e nao e aqui que isso se resolve.
+COLISOES = f"""
+    WITH envolvidos AS (
+        SELECT s.session_id, c.id AS car_id, c.team_id AS equipe_antes,
+               ({_IDENTIDADE_POS_FUSAO}) AS depois
+          FROM cars c
+          JOIN LATERAL (
+                SELECT r.session_id FROM results r WHERE r.car_id = c.id
+                 UNION
+                SELECT l.session_id FROM laps    l WHERE l.car_id = c.id
+               ) s ON TRUE
+         WHERE c.team_id IN (%(dup)s, %(canon)s)
+    )
+    SELECT session_id, depois::text,
+           array_agg(DISTINCT car_id ORDER BY car_id) AS carros
+      FROM envolvidos
+     GROUP BY session_id, depois
+    HAVING count(DISTINCT car_id) > 1
+       AND count(DISTINCT equipe_antes) > 1
+     ORDER BY session_id
+"""
+
+
+def identidades_afetadas(cur, dup_id: int, canonical_id: int) -> list[tuple]:
+    """
+    As (sessao, identidade) que a fusao alteraria, em ordem determinista.
+
+    A ordem importa: duas fusoes simultaneas que tomassem os mesmos locks em
+    ordens diferentes poderiam esperar uma pela outra em circulo. Ordenar pela
+    propria chave remove isso sem coordenacao adicional.
+    """
+    cur.execute(AFETADOS, {"dup": dup_id, "canon": canonical_id})
+    return sorted((linha[0], tuple(linha[1:])) for linha in cur.fetchall())
+
+
+def colisoes_internas(cur, dup_id: int, canonical_id: int) -> list[tuple]:
+    """Os grupos que a fusao juntaria dentro de uma sessao. Vazio e o normal."""
+    cur.execute(COLISOES, {"dup": dup_id, "canon": canonical_id})
+    return [(linha[0], linha[2]) for linha in cur.fetchall()]
 
 
 def _primeira_linha(erro: Exception) -> str:
@@ -189,6 +262,33 @@ def run(dry_run: bool = False) -> int:
         for dup in g["duplicates"]:
             dup_id = dup["id"]
             try:
+                # R1 — coordenacao com `upsert_car`, dentro desta transacao.
+                #
+                # Fundir equipes **muda a identidade** de carros ja gravados:
+                # `team_id` e uma das oito colunas de CAR_COLUMNS. Sem isto, a
+                # fusao escapava das duas protecoes que a ingestao tem — o
+                # lock por (sessao, identidade) e o guarda de identidade — e
+                # podia deixar dois carros de uma sessao indistinguiveis, que
+                # e exatamente o que o guarda recusa criar.
+                #
+                # Os locks vem primeiro e em ordem determinista: uma ingestao
+                # que esteja resolvendo qualquer uma destas identidades espera
+                # aqui, e a checagem abaixo passa a ver um estado estavel.
+                for sessao, identidade in identidades_afetadas(
+                        write_cur, dup_id, canonical_id):
+                    lock_car_identity(write_cur, sessao, identidade)
+
+                colisoes = colisoes_internas(write_cur, dup_id, canonical_id)
+                if colisoes:
+                    # Nao se escolhe um dos carros, nem pelo menor id: a
+                    # fusao e que nao acontece. Qual dos dois e a inscricao
+                    # publicada nao se decide aqui.
+                    detalhe = "; ".join(
+                        f"sessao {s}: carros {list(ids)}" for s, ids in colisoes[:5])
+                    raise FusaoRecusada(
+                        f"a fusao daria a dois carros da mesma sessao uma "
+                        f"identidade so — {detalhe}")
+
                 # Update all cars pointing to the duplicate
                 write_cur.execute("""
                     UPDATE cars SET team_id = %s WHERE team_id = %s
@@ -204,7 +304,14 @@ def run(dry_run: bool = False) -> int:
                 # The original error first and whole, before anything else can
                 # go wrong: a rollback that fails must not be what the reader
                 # is left holding.
-                print(f"  [ERROR] merge {dup_id} -> {canonical_id}: {falha}")
+                #
+                # Uma recusa nao e um defeito, e e rotulada a parte para que
+                # quem le o relatorio nao a leia como um erro de banco. As
+                # duas contam como fusao nao aplicada, que e o que importa
+                # para o codigo de saida.
+                rotulo = ("REFUSED" if isinstance(falha, FusaoRecusada)
+                          else "ERROR")
+                print(f"  [{rotulo}] merge {dup_id} -> {canonical_id}: {falha}")
                 motivo = _primeira_linha(falha)
                 try:
                     conn.rollback()
