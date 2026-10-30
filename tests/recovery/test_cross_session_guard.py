@@ -2,13 +2,16 @@
 A recuperacao nao pode produzir identidade concorrente nem ligar uma sessao
 ao carro de outra.
 
-`cars` nao tem escopo de sessao — ADR-0001 e explicito —, entao `upsert_car`
-resolve por atributo e devolve `ORDER BY id LIMIT 1`. `MEASURED` no acervo:
-**20 grupos de tupla identica com carros de sessoes diferentes**, o maior
-deles o numero 66, com **78 carros em 53 sessoes**; nenhum deles carrega
-volta. A garantia aqui nao e mexer nessa resolucao: e nunca produzir uma
-identidade que a leve ao carro errado, e nunca escolher carro por atributo
-para uma inscricao pareada.
+`cars` nao tem coluna de sessao, e a tupla de oito colunas descreve um carro
+sem identificar uma inscricao. `MEASURED` no acervo: **20 grupos de tupla
+identica com carros de sessoes diferentes**, o maior deles o numero 66, com
+**78 carros em 53 sessoes**; nenhum deles carrega volta.
+
+Desde R2-B a *resolucao* ja nao atravessa a sessao: `upsert_car` so procura
+entre os carros que a propria sessao aponta (ADR-0003). O que estes testes
+guardam e o outro lado, que nenhum escopo resolve — a recuperacao nao pode
+**produzir** uma identidade concorrente, nem escolher carro por atributo para
+uma inscricao que ja foi pareada pelo numero.
 """
 from __future__ import annotations
 

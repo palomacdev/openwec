@@ -842,13 +842,15 @@ def identity_twin(cur, car_id: int, attrs: tuple, session_id: int) -> int | None
     season, same number, same team, same model, same class, same tyre. The
     twenty-sixth would carry one that no car has.
 
-    Why that matters, and it is not a style point. `upsert_car` looks a car
-    up by the eight columns of `CAR_COLUMNS` and takes `ORDER BY id LIMIT 1`.
-    A later ingestion of this very classification would therefore resolve the
-    number to the **older** row, write its result against that car, and leave
-    `results` and `laps` of one session pointing at two different cars for
-    one entry — the split this module refuses to make when it matches by
-    number, reintroduced from the other side.
+    Why that mattered, and it was not a style point. `upsert_car` **used
+    to** look a car up by the eight columns of `CAR_COLUMNS` alone, taking
+    `ORDER BY id LIMIT 1`. A later ingestion of this very classification
+    would therefore resolve the number to the **older** row, write its
+    result against that car, and leave `results` and `laps` of one session
+    pointing at two different cars for one entry — the split this module
+    refuses to make when it matches by number, reintroduced from the other
+    side. R2-B closed that path; the next section says what follows from
+    it.
 
     So the fill stops where it would create a twin. It reports nothing and
     writes nothing; the caller counts it as not filled.

@@ -7,10 +7,12 @@ publicada testaria uma identidade que o carro nunca tera; conferir coluna a
 coluna nao testaria identidade nenhuma.
 
 `MEASURED` na sessao 1007, ja recuperada: escrever a equipe publicada daria a
-**25 dos 26 carros** a identidade de um carro mais antigo de outra sessao, e
-`upsert_car` resolve por `ORDER BY id LIMIT 1`. `MEASURED` no acervo: 4.361
-grupos de tupla identica, 76 grupos de equipe colidindo por caixa, e **20**
-grupos de tupla com carros de sessoes diferentes.
+**25 dos 26 carros** a identidade de um carro mais antigo de outra sessao.
+Desde R2-B isso ja nao desvia a resolucao — `upsert_car` so enxerga os carros
+da propria sessao (ADR-0003) —, mas continua sendo a razao de a tupla final
+ser uma mistura, que e o que estes testes afirmam. `MEASURED` no acervo:
+4.361 grupos de tupla identica, 76 grupos de equipe colidindo por caixa, e
+**20** grupos de tupla com carros de sessoes diferentes.
 """
 from __future__ import annotations
 
