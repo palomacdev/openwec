@@ -2,8 +2,7 @@ import { useState } from 'react'
 import SiteNav from '../components/SiteNav'
 import SiteFooter from '../components/SiteFooter'
 import Notice from '../components/Notice.jsx'
-
-const BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api/v1'
+import { requestApiKey } from '../api'
 
 const ENDPOINTS = [
   { path: '/series',                          auth: false, label: 'List all series' },
@@ -37,13 +36,7 @@ export default function ApiKeys() {
     setStatus('loading')
     setError(null)
     try {
-      const res = await fetch(`${BASE_URL}/api-keys/request`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(form),
-      })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.detail || 'Request failed')
+      const data = await requestApiKey(form)
       setApiKey(data.api_key)
       setStatus('success')
     } catch (err) {

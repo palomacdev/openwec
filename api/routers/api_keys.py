@@ -8,7 +8,7 @@ until manually approved.
 import secrets
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, EmailStr
-from api.deps import get_cursor
+from api.deps import get_cursor, limit_public_writes
 
 
 router = APIRouter(tags=["API Keys"])
@@ -30,7 +30,11 @@ def _generate_key() -> str:
     return f"owec_{secrets.token_urlsafe(24)}"
 
 
-@router.post("/api-keys/request", response_model=ApiKeyRequestOut)
+@router.post(
+    "/api-keys/request",
+    response_model=ApiKeyRequestOut,
+    dependencies=[Depends(limit_public_writes)],
+)
 def request_api_key(payload: ApiKeyRequestIn, cur=Depends(get_cursor)):
     """
     Requests an API key for protected endpoints (laps, analytics).

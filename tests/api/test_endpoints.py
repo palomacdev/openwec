@@ -160,11 +160,30 @@ def test_driver_not_found(client):
     assert r.status_code == 404
 
 
-# ── Protected endpoints ───────────────────────────────────────
+# ── Public reads (what the dashboard draws) ──────────────────
 
-def test_stints_requires_key(client):
+def test_stints_is_public(client):
+    """
+    The dashboard draws this with no credential. A 401 here is the failure
+    that left the deployed site stuck on "Loading race data…".
+    """
     r = client.get(f"/api/v1/sessions/{SESSION_ID}/stints")
-    assert r.status_code in (200, 401, 404)
+    assert r.status_code != 401
+    assert r.status_code in (200, 404, 429)
+
+
+def test_race_control_is_public(client):
+    r = client.get(f"/api/v1/sessions/{SESSION_ID}/race-control")
+    assert r.status_code != 401
+
+
+def test_bulk_laps_still_requires_key(client):
+    """The line: one car is public, a whole session is not."""
+    r = client.get(f"/api/v1/sessions/{SESSION_ID}/laps")
+    assert r.status_code in (200, 401)  # 200 only where API_KEYS is unset
+
+
+# ── Protected endpoints ───────────────────────────────────────
 
 
 def test_stints_with_key(client, auth_headers):

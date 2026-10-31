@@ -7,7 +7,7 @@ import hashlib
 import logging
 import time
 from typing import Generator
-from fastapi import Depends, HTTPException, Security, status
+from fastapi import Depends, HTTPException, Request, Security, status
 from fastapi.security import APIKeyHeader
 import psycopg2
 import psycopg2.extras
@@ -95,6 +95,13 @@ def _fire_rate_limit_alert(api_key: str, limit: int, window: str):
         _rate_limit_hits[api_key] = 0  # reset counter after alert
 
 
+def _retry_after() -> dict[str, str]:
+    """Seconds left in the current fixed window, so a client can be told when
+    to come back instead of guessing."""
+    restante = _RATE_WINDOW_SECONDS - (time.time() % _RATE_WINDOW_SECONDS)
+    return {"Retry-After": str(max(1, int(restante)))}
+
+
 def _check_rate_limit_redis(r, api_key: str, limit_per_minute: int):
     """Redis fixed-window rate limiter using INCR + EXPIRE."""
     window = int(time.time() // _RATE_WINDOW_SECONDS)
@@ -107,6 +114,7 @@ def _check_rate_limit_redis(r, api_key: str, limit_per_minute: int):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=f"Rate limit exceeded ({limit_per_minute} requests/minute). Try again shortly.",
+            headers=_retry_after(),
         )
 
 
@@ -123,6 +131,7 @@ def _check_rate_limit_memory(api_key: str, limit_per_minute: int):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=f"Rate limit exceeded ({limit_per_minute} requests/minute). Try again shortly.",
+            headers=_retry_after(),
         )
 
 
@@ -235,4 +244,68 @@ def require_api_key(api_key: str = Security(api_key_header), conn=Depends(get_db
         )
 
     _check_rate_limit(api_key, rpm, daily, monthly)
+    return True
+
+
+# ── Public reads ──────────────────────────────────────────────
+# The dashboard is a static bundle served from openwec.com. Anything it is
+# given to authenticate with is downloaded by every visitor, so it is given
+# nothing: the endpoints it needs read without a credential, metered by client
+# address instead.
+#
+# These limits dampen abuse; they are not a security control. An address can be
+# changed, and the data behind them is public by decision, not by accident.
+
+PUBLIC_RATE_LIMIT_PER_MINUTE  = 60
+PUBLIC_WRITE_LIMIT_PER_MINUTE = 5
+
+
+def _client_ip(request: Request) -> str:
+    """
+    The address to meter. Takes the *last* entry of X-Forwarded-For, not the
+    first: nginx appends the peer it actually saw, so anything a client puts in
+    that header ahead of it is its own invention.
+    """
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        ultimo = forwarded.split(",")[-1].strip()
+        if ultimo:
+            return ultimo
+    return getattr(request.client, "host", None) or "unknown"
+
+
+def allow_public_read(
+    request: Request,
+    api_key: str = Security(api_key_header),
+    conn=Depends(get_db),
+):
+    """
+    Dependency for the read endpoints the public dashboard needs.
+
+    - With a key: exactly `require_api_key`. Private consumers keep their
+      authentication, their quotas and their higher limits, and a key that is
+      wrong is still refused — a bad credential is never quietly downgraded to
+      an anonymous request.
+    - Without a key: allowed, and metered per client address.
+    """
+    if api_key:
+        return require_api_key(api_key=api_key, conn=conn)
+
+    _check_rate_limit(f"anon:{_client_ip(request)}", PUBLIC_RATE_LIMIT_PER_MINUTE)
+    return True
+
+
+# A route that takes an optional key still declares the scheme, so /docs would
+# draw a padlock and a reader would conclude a key is required. The empty
+# requirement says, in OpenAPI's own terms, that no credential is also valid.
+PUBLIC_READ_OPENAPI = {"security": [{}, {"APIKeyHeader": []}]}
+
+
+def limit_public_writes(request: Request):
+    """
+    The one write that is open to the public — requesting an API key — metered
+    per address. Without this, a loop fills `api_key_requests` and the daily
+    report mails every row of it.
+    """
+    _check_rate_limit(f"write:{_client_ip(request)}", PUBLIC_WRITE_LIMIT_PER_MINUTE)
     return True

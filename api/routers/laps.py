@@ -1,12 +1,14 @@
 """
 OpenWEC API — Laps Router
-Protected endpoints: lap-by-lap data.
-Requires X-API-Key header.
+Lap-by-lap data.
+
+The per-car route is public, because the dashboard draws it. The bulk route
+stays behind a key: it is the one that hands over a whole session at a time.
 """
 
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
-from api.deps import get_cursor, require_api_key
+from api.deps import PUBLIC_READ_OPENAPI, allow_public_read, get_cursor, require_api_key
 from api.schemas import LapOut, PaginatedLaps
 from api.config import settings
 
@@ -119,7 +121,8 @@ def get_laps(
 @router.get(
     "/sessions/{session_id}/laps/{car_number}",
     response_model=list[LapOut],
-    dependencies=[Depends(require_api_key)],
+    dependencies=[Depends(allow_public_read)],
+    openapi_extra=PUBLIC_READ_OPENAPI,
 )
 def get_car_laps(
     session_id: int,
@@ -128,7 +131,7 @@ def get_car_laps(
 ):
     """
     All laps for a specific car in a session.
-    Protected — requires X-API-Key header.
+    Public; a key raises the rate limit.
     """
     cur.execute("""
         SELECT
