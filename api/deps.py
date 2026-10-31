@@ -7,6 +7,7 @@ import hashlib
 import ipaddress
 import logging
 import socket
+import threading
 import time
 from typing import Generator
 from fastapi import Depends, HTTPException, Request, Security, status
@@ -66,13 +67,55 @@ def _porta_responde(host: str, port: int, timeout: float) -> bool:
     Measured against a port that black-holes packets rather than refusing
     them: `socket_connect_timeout=1` produced a **15 second** failure, the
     library's retries multiplying what looked like a one-second bound. Every
-    request would pay that. This probe is bounded by us.
+    request would pay that.
+
+    `socket.create_connection`'s own timeout does not cover the name lookup
+    that runs first, and in a compose network the host IS a name -- one that
+    stops resolving the moment the container stops. Measured in that state:
+    `timeout=0.5` took **2.3 seconds**, all of it in `getaddrinfo`, against
+    0.001s for the same call with a literal address. So the probe runs in a
+    thread and we wait on the clock, not on the socket's good intentions.
     """
-    try:
-        with socket.create_connection((host, port), timeout=timeout):
-            return True
-    except OSError:
-        return False
+    resultado: list[bool] = []
+
+    def tentar():
+        try:
+            with socket.create_connection((host, port), timeout=timeout):
+                resultado.append(True)
+        except OSError:
+            resultado.append(False)
+
+    t = threading.Thread(target=tentar, daemon=True)
+    t.start()
+    t.join(timeout)
+    # A thread still resolving when the clock runs out is left to finish on
+    # its own and ignored; it is a daemon and holds nothing.
+    return bool(resultado) and resultado[0]
+
+
+def _esquecer_redis(motivo: str) -> None:
+    """
+    Drop the cached client and stop trying for a while.
+
+    Called both when acquisition fails and when a client that *was* working
+    stops working, which is the case the cache made invisible.
+    """
+    global _redis_client, _redis_unavailable_until, _redis_fallback_logged
+    _redis_client = None
+    _redis_unavailable_until = time.time() + _REDIS_RETRY_SECONDS
+    if not _redis_fallback_logged:
+        # Once per outage, not once per request. No address or credential in
+        # the record -- only the consequence, which is the part an operator
+        # needs.
+        logger.warning(
+            "rate_limit_degraded",
+            extra={
+                "reason":        motivo,
+                "effect":        "limits are per process, not shared",
+                "retry_seconds": _REDIS_RETRY_SECONDS,
+            },
+        )
+        _redis_fallback_logged = True
 
 
 def _get_redis():
@@ -102,20 +145,7 @@ def _get_redis():
         _redis_fallback_logged = False
         return r
     except Exception:
-        _redis_unavailable_until = agora + _REDIS_RETRY_SECONDS
-        if not _redis_fallback_logged:
-            # Once per outage, not once per request. No address or credential
-            # in the record -- only the consequence, which is the part an
-            # operator needs.
-            logger.warning(
-                "rate_limit_degraded",
-                extra={
-                    "reason":        "redis_unavailable",
-                    "effect":        "limits are per process, not shared",
-                    "retry_seconds": _REDIS_RETRY_SECONDS,
-                },
-            )
-            _redis_fallback_logged = True
+        _esquecer_redis("redis_unavailable")
         return None
 
 
@@ -218,10 +248,28 @@ def _check_rate_limit(api_key: str, limit_per_minute: int,
                       daily_limit: int | None = None,
                       monthly_limit: int | None = None):
     r = _get_redis()
-    if r:
+    if r is None:
+        _check_rate_limit_memory(api_key, limit_per_minute)
+        return
+
+    try:
         _check_rate_limit_redis(r, api_key, limit_per_minute)
         _check_quota_redis(r, api_key, daily_limit, monthly_limit)
-    else:
+    except HTTPException:
+        # The 429 itself. It travels through here and must not be mistaken
+        # for an outage -- catching it would hand every rate-limited caller
+        # a free pass.
+        raise
+    except Exception:
+        # A client acquired while Redis was healthy keeps being handed out by
+        # the cache, and its first failure used to escape as a 500. Measured
+        # against a stopped Redis container: `redis.exceptions.ConnectionError
+        # ... Name or service not known` reaching the client, 500 after ~30s,
+        # and no degradation warning -- the fallback this module advertises
+        # never ran, because it only ever applied at acquisition time.
+        #
+        # Losing Redis must cost shared counting, not availability.
+        _esquecer_redis("redis_connection_lost")
         _check_rate_limit_memory(api_key, limit_per_minute)
 
 
