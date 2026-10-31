@@ -8,6 +8,37 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### SDK 0.3.0 — prepared, not published
+
+The API gained per-minute budgets for reads made without a key, and answers
+`429` with `Retry-After`. The SDK read neither.
+
+#### Added
+- `OpenWECRateLimitError` (429), carrying `.retry_after` in seconds, or `None`
+  when the API gave no guidance — which is not the same as zero
+- `OpenWECPermissionError` (403) and `OpenWECServerError` (5xx)
+- `configure(max_retries=...)` — wait out a 429 automatically. Defaults to `0`,
+  so nothing blocks unless asked
+- `configure(retry_max_wait=...)` — ceiling for one wait, default 60s. Sleeping
+  past it would be a hang, not a retry, so it raises instead
+- `Retry-After` parsed in both legal forms, seconds and HTTP-date; a date in
+  the past reads as "no guidance"
+
+#### Changed
+- **Behaviour:** 403, 429 and 5xx previously surfaced as a bare
+  `httpx.HTTPStatusError`. They now raise typed `OpenWECError` subclasses,
+  matching how 401 and 404 have always behaved. Code catching
+  `httpx.HTTPStatusError` for these three needs updating; code catching
+  `OpenWECError` already covers them
+- `test_version` now asserts `pyproject.toml` and `__version__` agree, instead
+  of pinning a literal that had to be edited every release
+
+#### Compatibility
+- No endpoint changes, and nothing here requires the new API. Verified against
+  the contract actually deployed (23 routes) and against `main` (27): every
+  deployed route still exists, four relax from required to optional credential,
+  and none of the eight routes the SDK calls changes shape
+
 ---
 
 ## [0.2.4] — 2026-08-18

@@ -294,7 +294,20 @@ def test_driver_laps_not_found():
 # ── Exceptions ────────────────────────────────────────────────
 
 def test_version():
-    assert openwec.__version__ == "0.2.4"
+    """
+    The version lives in two files. A literal here would have to be edited on
+    every release and tells us nothing; what is worth pinning is that the two
+    agree, because a package whose metadata and __version__ disagree ships a
+    wheel that lies about itself.
+    """
+    import pathlib
+    import re
+
+    pyproject = pathlib.Path(__file__).resolve().parents[2] / "sdk" / "pyproject.toml"
+    m = re.search(r'^version\s*=\s*"([^"]+)"', pyproject.read_text(encoding="utf-8"), re.M)
+    assert m, "sdk/pyproject.toml declares no version"
+    assert openwec.__version__ == m.group(1)
+    assert re.fullmatch(r"\d+\.\d+\.\d+", openwec.__version__)
 
 
 @respx.mock
