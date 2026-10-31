@@ -2,14 +2,7 @@ import { useEffect, useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import SiteNav from '../components/SiteNav'
 import SiteFooter from '../components/SiteFooter'
-
-const BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api/v1'
-
-async function apiFetch(path) {
-  const res = await fetch(BASE_URL + path)
-  if (!res.ok) throw new Error(`${res.status} ${path}`)
-  return res.json()
-}
+import { getDriver, getDriverResults } from '../api'
 
 const COUNTRY_FLAGS = {
   PRT: '🇵🇹', GBR: '🇬🇧', ITA: '🇮🇹', FRA: '🇫🇷', DEU: '🇩🇪',
@@ -46,8 +39,8 @@ export default function DriverProfile() {
       try {
         setLoading(true)
         const [profileData, resultsData] = await Promise.all([
-          apiFetch(`/drivers/${id}`),
-          apiFetch(`/drivers/${id}/results?limit=100`),
+          getDriver(id),
+          getDriverResults(id, 100),
         ])
         if (cancelled) return
         setProfile(profileData)
