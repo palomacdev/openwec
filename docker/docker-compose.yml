@@ -19,7 +19,14 @@ services:
       LANG: en_US.utf8
       LC_ALL: en_US.utf8
     ports:
-       - "${DB_PORT:-5433}:5432"
+      # Bind the host interface explicitly. Without one, Docker publishes on
+      # 0.0.0.0 and ::, and this database answers to anyone who can reach the
+      # machine on this port -- with the development superuser and the
+      # development password, which are both `openwec` and both in this file.
+      #
+      # Override only with a reason, and never with 0.0.0.0:
+      #   DB_BIND_HOST=172.30.224.1  # reach it from WSL
+      - "${DB_BIND_HOST:-127.0.0.1}:${DB_PORT:-5433}:5432"
     volumes:
       - db_data:/var/lib/postgresql/data
       - ../database/schema.sql:/docker-entrypoint-initdb.d/schema.sql
