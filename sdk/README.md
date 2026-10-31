@@ -86,6 +86,48 @@ Lap-by-lap data and analytics endpoints require a free API key.
 
 ---
 
+## Errors and rate limits
+
+Reads made without a key share a per-minute budget. A sweep over many sessions
+will reach it, and the API answers `429` with a `Retry-After`. Every failure
+mode has its own exception, so you can tell them apart:
+
+| Status | Exception | What it means |
+|--------|-----------|---------------|
+| 401 | `OpenWECAuthError` | no key, and this endpoint needs one |
+| 403 | `OpenWECPermissionError` | the key is valid but not allowed here |
+| 404 | `OpenWECNotFoundError` | no such session, driver or team |
+| 429 | `OpenWECRateLimitError` | budget spent — carries `.retry_after` |
+| 5xx | `OpenWECServerError` | the API failed; the request was fine |
+
+All of them derive from `OpenWECError`.
+
+```python
+from openwec import OpenWECRateLimitError
+import time
+
+try:
+    laps = session.laps()
+except OpenWECRateLimitError as e:
+    time.sleep(e.retry_after or 60)   # None means the API did not say
+    laps = session.laps()
+```
+
+Or let the SDK wait for you. It is **off by default** — a library should not
+block your notebook without being asked:
+
+```python
+openwec.configure(max_retries=3)          # wait out up to three 429s
+openwec.configure(retry_max_wait=30)      # but never sleep more than 30s at once
+```
+
+A `Retry-After` longer than `retry_max_wait` raises instead of sleeping, and a
+`429` without a `Retry-After` always raises — there is nothing to wait for.
+
+Configuring a key raises your budget and removes the shared one.
+
+---
+
 ## Session methods
 
 | Method | Description | Key required |

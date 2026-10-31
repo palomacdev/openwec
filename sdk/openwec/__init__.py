@@ -31,10 +31,18 @@ Usage:
     session.plot_gap_to_leader()
 """
 
-from .client import configure, OpenWECError, OpenWECNotFoundError, OpenWECAuthError
+from .client import (
+    configure,
+    OpenWECError,
+    OpenWECNotFoundError,
+    OpenWECAuthError,
+    OpenWECPermissionError,
+    OpenWECRateLimitError,
+    OpenWECServerError,
+)
 from .session import Session
 
-__version__ = "0.2.4"
+__version__ = "0.3.0"
 
 __all__ = [
     "Session",
@@ -42,4 +50,7 @@ __all__ = [
     "OpenWECError",
     "OpenWECNotFoundError",
     "OpenWECAuthError",
+    "OpenWECPermissionError",
+    "OpenWECRateLimitError",
+    "OpenWECServerError",
 ]
