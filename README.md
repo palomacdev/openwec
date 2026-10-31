@@ -209,18 +209,26 @@ Full interactive documentation: **[api.openwec.com/docs](https://api.openwec.com
 | `GET /drivers/{id}` | Driver profile + career stats |
 | `GET /teams/{id}` | Team profile + history |
 | `GET /events/{id}` | Event with all sessions |
+| `GET /sessions/{id}/stints` | Stint breakdown |
+| `GET /sessions/{id}/gaps` | Gap to leader evolution |
+| `GET /sessions/{id}/laps/{car}` | Lap-by-lap data, one car |
+| `GET /sessions/{id}/race-control` | SC / FCY periods |
+
+Anonymous requests are limited to 60 per minute per client address, and a `429`
+carries `Retry-After`. Sending a valid key lifts that limit; sending an invalid
+one is still refused.
 
 ### Protected endpoints (API key required)
 
 | Endpoint | Description |
 |----------|-------------|
-| `GET /sessions/{id}/laps/{car}` | Lap-by-lap data |
-| `GET /sessions/{id}/stints` | Stint breakdown |
+| `GET /sessions/{id}/laps` | Lap-by-lap data, whole session |
 | `GET /sessions/{id}/pace` | Green flag pace comparison |
-| `GET /sessions/{id}/gaps` | Gap to leader evolution |
 | `GET /sessions/{id}/pit-window` | Pit window estimator |
-| `GET /sessions/{id}/race-control` | SC / FCY periods |
 | `GET /drivers/{id}/consistency` | Driver consistency stats |
+
+The line is what a page shows versus what a consumer extracts: one car's laps
+draw a chart, a whole session's laps are a dataset.
 
 ---
 

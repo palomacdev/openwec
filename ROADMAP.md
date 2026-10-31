@@ -13,7 +13,9 @@
 ## Phase 3 — Public API ✅
 - FastAPI REST API
 - Public endpoints: series, seasons, events, sessions, results, drivers, teams
-- Protected endpoints: laps, analytics (X-API-Key)
+- Public endpoints also cover the per-session analytics the dashboard draws,
+  rate limited per client address
+- Protected endpoints: bulk laps, pace, pit-window, consistency (X-API-Key)
 - Interactive docs at api.openwec.com/docs
 
 ## Phase 4 — Enrichment ✅
