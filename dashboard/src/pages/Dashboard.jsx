@@ -1,26 +1,14 @@
 import { useEffect, useState, useCallback } from 'react'
-import { getEvent, getResults, getStints, getGaps, getCarLaps, getRaceControl } from '../api'
+import {
+  getEvent, getResults, getStints, getGaps, getCarLaps, getRaceControl,
+  getSeasons, getEvents, getSessions,
+} from '../api'
 import Leaderboard from '../components/Leaderboard'
 import StintChart from '../components/StintChart'
 import LapEvolutionChart from '../components/LapEvolutionChart'
 import GapChart from '../components/GapChart'
 import RaceControl from '../components/RaceControl'
 import { Link } from 'react-router-dom'
-
-const BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api/v1'
-const API_KEY  = import.meta.env.VITE_API_KEY || ''
-
-async function apiFetch(path, params = {}) {
-  const url = new URL(BASE_URL + path)
-  Object.entries(params).forEach(([k, v]) => {
-    if (v !== null && v !== undefined && v !== '') url.searchParams.set(k, v)
-  })
-  const headers = {}
-  if (API_KEY) headers['X-API-Key'] = API_KEY
-  const res = await fetch(url, { headers })
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
-  return res.json()
-}
 
 const SERIES_LIST = ['WEC', 'ELMS', 'ALMS', 'LEMANSCUP', 'IMSA']
 const CLASSES     = ['HYPERCAR', 'LMP2', 'LMGT3', 'GTP', 'GTD', 'GTLM', 'DPi', 'LMP1']
@@ -52,7 +40,7 @@ export default function Dashboard() {
 
   // ── Load seasons when series changes ─────────────────────
   useEffect(() => {
-    apiFetch(`/series/${series}/seasons`)
+    getSeasons(series)
       .then((data) => {
         const sorted = [...data].sort((a, b) => b.year - a.year)
         setSeasons(sorted)
@@ -60,13 +48,13 @@ export default function Dashboard() {
         const years = sorted.map(s => s.year)
         if (!years.includes(year)) setYear(sorted[0]?.year)
       })
-      .catch(() => {})
+      .catch(e => setError(e.message))
   }, [series])
 
   // ── Load events when series/year changes ─────────────────
   useEffect(() => {
     if (!year) return
-    apiFetch(`/series/${series}/seasons/${year}/events`)
+    getEvents(series, year)
       .then((data) => {
         setEvents(data)
         if (series === DEFAULT.series && year === DEFAULT.year) {
@@ -75,13 +63,13 @@ export default function Dashboard() {
           setEventId(data[0]?.id || null)
         }
       })
-      .catch(() => {})
+      .catch(e => setError(e.message))
   }, [series, year])
 
   // ── Load sessions when event changes ─────────────────────
   useEffect(() => {
     if (!eventId) return
-    apiFetch(`/series/${series}/seasons/${year}/events/${eventId}/sessions`)
+    getSessions(series, year, eventId)
       .then((data) => {
         setSessions(data)
         if (series === DEFAULT.series && year === DEFAULT.year && eventId === DEFAULT.eventId) {
@@ -94,12 +82,12 @@ export default function Dashboard() {
           setSessionId(race?.id || data[0]?.id || null)
         }
       })
-      .catch(() => {})
+      .catch(e => setError(e.message))
   }, [series, year, eventId])
 
   // ── Load dashboard data when session changes ──────────────
   useEffect(() => {
-    if (!sessionId) return
+    if (!sessionId) { setLoading(false); return }
     let cancelled = false
 
     async function load() {
@@ -130,7 +118,7 @@ export default function Dashboard() {
 
         getRaceControl(sessionId)
           .then(data => !cancelled && setRaceControl(data))
-          .catch(() => !cancelled && setRaceControl([]))
+          .catch(e => { if (!cancelled) { setRaceControl([]); setError(e.message) } })
       } catch (e) {
         if (!cancelled) setError(e.message)
       } finally {
@@ -154,8 +142,8 @@ export default function Dashboard() {
         if (cancelled) return
         setStints(stintsData)
         setGaps(gapsData)
-      } catch {
-        if (!cancelled) { setStints([]); setGaps([]) }
+      } catch (e) {
+        if (!cancelled) { setStints([]); setGaps([]); setError(e.message) }
       }
     }
     load()
@@ -168,7 +156,7 @@ export default function Dashboard() {
     let cancelled = false
     getCarLaps(sessionId, selectedCar)
       .then(data => !cancelled && setLaps(data))
-      .catch(() => !cancelled && setLaps([]))
+      .catch(e => { if (!cancelled) { setLaps([]); setError(e.message) } })
     return () => { cancelled = true }
   }, [selectedCar, sessionId])
 

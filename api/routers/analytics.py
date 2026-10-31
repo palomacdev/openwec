@@ -1,7 +1,11 @@
 """
 OpenWEC API — Analytics Router
-Protected endpoints: pre-computed analytics data.
-Requires X-API-Key header.
+Pre-computed analytics data.
+
+The three routes the public dashboard draws are open, metered per client
+address. `pace`, `pit-window` and `consistency` stay behind a key: nothing
+public reads them.
+A key is still accepted everywhere, and raises the limit.
 
 Endpoints:
     GET /sessions/{id}/stints       ← stint breakdown per car
@@ -15,7 +19,7 @@ from collections import defaultdict
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from api.deps import get_cursor, require_api_key
+from api.deps import PUBLIC_READ_OPENAPI, allow_public_read, get_cursor, require_api_key
 from api.config import settings
 
 
@@ -184,7 +188,8 @@ def estimate_window(
 @router.get(
     "/sessions/{session_id}/stints",
     response_model=list[StintOut],
-    dependencies=[Depends(require_api_key)],
+    dependencies=[Depends(allow_public_read)],
+    openapi_extra=PUBLIC_READ_OPENAPI,
 )
 def get_stints(
     session_id: int,
@@ -288,7 +293,8 @@ def get_pace(
 @router.get(
     "/sessions/{session_id}/gaps",
     response_model=list[GapPoint],
-    dependencies=[Depends(require_api_key)],
+    dependencies=[Depends(allow_public_read)],
+    openapi_extra=PUBLIC_READ_OPENAPI,
 )
 def get_gaps(
     session_id: int,
@@ -496,7 +502,8 @@ FLAG_LABELS = {
 @router.get(
     "/sessions/{session_id}/race-control",
     response_model=list[RaceControlPeriod],
-    dependencies=[Depends(require_api_key)],
+    dependencies=[Depends(allow_public_read)],
+    openapi_extra=PUBLIC_READ_OPENAPI,
 )
 def get_race_control(session_id: int, cur=Depends(get_cursor)):
     """

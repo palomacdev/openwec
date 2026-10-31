@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
+import { getSeasons, getEvents, getSessions, getResults } from '../api'
 import SiteNav from '../components/SiteNav'
 import SiteFooter from '../components/SiteFooter'
 
@@ -9,14 +10,6 @@ function formatDrivers(drivers) {
     .sort((a, b) => (a.slot || 0) - (b.slot || 0))
     .map(d => `${d.first_name || ''} ${d.last_name || ''}`.trim())
     .join(' / ')
-}
-
-const BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api/v1'
-
-async function apiFetch(path) {
-  const res = await fetch(BASE_URL + path)
-  if (!res.ok) throw new Error(`${res.status} ${path}`)
-  return res.json()
 }
 
 const CLASS_COLOR = {
@@ -63,7 +56,7 @@ export default function Explore() {
     setSeason(null); setEvents([]); setEvent(null)
     setSessions([]); setSession(null); setResults([])
     setError(null)
-    apiFetch(`/series/${series}/seasons`)
+    getSeasons(series)
       .then((data) => {
         const sorted = [...data].sort((a, b) => b.year - a.year)
         setSeasons(sorted)
@@ -76,7 +69,7 @@ export default function Explore() {
   useEffect(() => {
     if (!season) return
     setEvent(null); setSessions([]); setSession(null); setResults([])
-    apiFetch(`/series/${series}/seasons/${season.year}/events`)
+    getEvents(series, season.year)
       .then((data) => setEvents(data))
       .catch((e) => setError(e.message))
   }, [season])
@@ -85,7 +78,7 @@ export default function Explore() {
   useEffect(() => {
     if (!event) return
     setSession(null); setResults([])
-    apiFetch(`/series/${series}/seasons/${season.year}/events/${event.id}/sessions`)
+    getSessions(series, season.year, event.id)
       .then((data) => {
         setSessions(data)
         // Auto-select first Race session
@@ -100,7 +93,7 @@ export default function Explore() {
   useEffect(() => {
     if (!session) return
     setLoading(true); setResults([])
-    apiFetch(`/sessions/${session.id}/results`)
+    getResults(session.id)
       .then((data) => setResults(data))
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false))
