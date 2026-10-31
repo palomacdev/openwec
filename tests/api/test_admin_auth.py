@@ -1,20 +1,20 @@
 """
 OpenWEC — Admin authentication tests
 
-Two things are asserted here, and they are independent:
+Three things are asserted here, and they are independent:
 
-1. `require_admin_key` keeps the exact semantics it had before the credential
-   logging was removed. It is deliberately stricter than `require_api_key`:
-   it denies even when API_KEYS is unset, and it accepts *only* static keys —
-   a dynamic key that works on /laps gets 401 here.
+1. Administration is authorized by ADMIN_API_KEYS and by nothing else. An
+   ordinary API key is refused, including when it is the *only* thing
+   configured, and including when someone has copied it into ADMIN_API_KEYS.
 
-2. No credential value ever reaches stdout, stderr or the logging module.
-   Not the key that was received, not the configured key set, and not any
-   derived form of either.
+2. The check is fail-closed. Absent, short or self-contradictory configuration
+   leaves /admin/* shut rather than open.
+
+3. No credential value ever reaches stdout, stderr or the logging module.
+   Not the value received, not the configured set, not any derived form.
 
 These run with no database, no server and no network: `require_admin_key`
-depends only on the settings object and the header value, so the settings are
-replaced with a stub.
+depends only on the settings object and the header value.
 
     pytest tests/api/test_admin_auth.py -v
 """
@@ -25,111 +25,198 @@ import logging
 import pytest
 from fastapi import HTTPException
 
+from api.config import ADMIN_KEY_MIN_LENGTH, Settings
 from api.routers import admin
 
 
-# Obviously-synthetic values. They exist only to be searched for in captured
-# output — if any of them shows up there, the test fails.
-STATIC_KEY_A = "SYNTHETIC-STATIC-KEY-AAAA-0001"
-STATIC_KEY_B = "SYNTHETIC-STATIC-KEY-BBBB-0002"
-DYNAMIC_KEY = "SYNTHETIC-DYNAMIC-KEY-CCCC-0003"
-WRONG_KEY = "SYNTHETIC-WRONG-KEY-DDDD-0004"
+# Obviously-synthetic values. They exist to be searched for in captured output —
+# if any of them shows up there, the test fails.
+ADMIN_CRED   = "SYNTHETIC-ADMIN-CREDENTIAL-AAAA-0001"
+ADMIN_CRED_2 = "SYNTHETIC-ADMIN-CREDENTIAL-BBBB-0002"
+COMMON_KEY   = "SYNTHETIC-COMMON-API-KEY-CCCC-0003"
+DYNAMIC_KEY  = "SYNTHETIC-DYNAMIC-KEY-DDDD-0004"
+WRONG_KEY    = "SYNTHETIC-WRONG-KEY-EEEE-0005"
+SHORT_CRED   = "SYNTHETIC-SHORT-0006"
 
-ALL_SECRETS = (STATIC_KEY_A, STATIC_KEY_B, DYNAMIC_KEY, WRONG_KEY)
+ALL_SECRETS = (ADMIN_CRED, ADMIN_CRED_2, COMMON_KEY,
+               DYNAMIC_KEY, WRONG_KEY, SHORT_CRED)
 
 
-class _StubSettings:
-    """Minimal stand-in for api.config.settings, with only what admin.py uses."""
-
-    def __init__(self, keys):
-        self.valid_api_keys = set(keys)
+def montar(api_keys: str = "", admin_api_keys: str = "") -> Settings:
+    """
+    A real Settings object, so the parsing rules under test are the ones the
+    application uses. Explicit arguments take precedence over the environment
+    and over any .env on disk.
+    """
+    return Settings(api_keys=api_keys, admin_api_keys=admin_api_keys)
 
 
 @pytest.fixture
-def com_chaves(monkeypatch):
-    """API_KEYS configured with two static keys."""
-    monkeypatch.setattr(admin, "settings", _StubSettings({STATIC_KEY_A, STATIC_KEY_B}))
+def configurado(monkeypatch):
+    """The intended configuration: common keys and admin credentials, disjoint."""
+    monkeypatch.setattr(admin, "settings", montar(
+        api_keys=COMMON_KEY,
+        admin_api_keys=f"{ADMIN_CRED},{ADMIN_CRED_2}",
+    ))
 
 
 @pytest.fixture
-def sem_chaves(monkeypatch):
-    """API_KEYS unset — the empty-set case."""
-    monkeypatch.setattr(admin, "settings", _StubSettings(set()))
+def sem_administracao(monkeypatch):
+    """API keys configured, ADMIN_API_KEYS empty."""
+    monkeypatch.setattr(admin, "settings", montar(api_keys=COMMON_KEY))
 
 
-# ── Semantics: unchanged by the logging removal ───────────────────
+def negado(api_key):
+    """Asserts that this header value does not authorize administration."""
+    with pytest.raises(HTTPException) as exc:
+        admin.require_admin_key(api_key=api_key)
+    assert exc.value.status_code == 401
+    return exc.value
 
-def test_valid_static_key_is_accepted(com_chaves):
-    assert admin.require_admin_key(api_key=STATIC_KEY_A) == STATIC_KEY_A
-    assert admin.require_admin_key(api_key=STATIC_KEY_B) == STATIC_KEY_B
+
+# ── The five cases the separation has to satisfy ──────────────────
+
+def test_chave_comum_nao_autoriza(configurado):
+    """A key from API_KEYS is an API key. It is not an admin credential."""
+    negado(COMMON_KEY)
 
 
-def test_missing_key_is_rejected(com_chaves):
+def test_chave_dinamica_nao_autoriza(configurado):
+    """A dynamic key works on /laps; it never works here."""
+    negado(DYNAMIC_KEY)
+
+
+def test_sem_chave_nao_autoriza(configurado):
     for ausente in (None, ""):
-        with pytest.raises(HTTPException) as exc:
-            admin.require_admin_key(api_key=ausente)
-        assert exc.value.status_code == 401
+        negado(ausente)
 
 
-def test_wrong_key_is_rejected(com_chaves):
-    with pytest.raises(HTTPException) as exc:
-        admin.require_admin_key(api_key=WRONG_KEY)
-    assert exc.value.status_code == 401
+def test_credencial_administrativa_autoriza(configurado):
+    assert admin.require_admin_key(api_key=ADMIN_CRED) == ADMIN_CRED
+    assert admin.require_admin_key(api_key=ADMIN_CRED_2) == ADMIN_CRED_2
 
 
-def test_dynamic_key_is_rejected(com_chaves):
-    """A dynamic key is valid on protected routes but never on admin ones."""
-    with pytest.raises(HTTPException) as exc:
-        admin.require_admin_key(api_key=DYNAMIC_KEY)
-    assert exc.value.status_code == 401
+def test_configuracao_vazia_nao_autoriza(sem_administracao):
+    """Fail-closed: nothing is accepted, not even a well-formed credential."""
+    for tentativa in (None, "", ADMIN_CRED, COMMON_KEY, DYNAMIC_KEY):
+        negado(tentativa)
 
 
-def test_unset_api_keys_denies_everything(sem_chaves):
-    """Stricter than require_api_key, which returns True when API_KEYS is empty."""
-    for tentativa in (None, "", STATIC_KEY_A, DYNAMIC_KEY):
-        with pytest.raises(HTTPException) as exc:
-            admin.require_admin_key(api_key=tentativa)
-        assert exc.value.status_code == 401
+# ── Fail-closed, in the ways configuration actually goes wrong ────
+
+def test_credencial_curta_e_tratada_como_ausente(monkeypatch):
+    """A leftover placeholder must not be what guards /admin/*."""
+    assert len(SHORT_CRED) < ADMIN_KEY_MIN_LENGTH
+    monkeypatch.setattr(admin, "settings", montar(admin_api_keys=SHORT_CRED))
+    negado(SHORT_CRED)
 
 
-def test_rejection_detail_carries_no_credential(com_chaves):
-    with pytest.raises(HTTPException) as exc:
-        admin.require_admin_key(api_key=WRONG_KEY)
-    for segredo in ALL_SECRETS:
-        assert segredo not in str(exc.value.detail)
+def test_chave_comum_copiada_para_admin_fecha_a_administracao(monkeypatch):
+    """
+    The natural mistake — reusing an API key as the admin credential — must not
+    work. Dropping it means the value authorizes nothing, in either role.
+    """
+    monkeypatch.setattr(admin, "settings", montar(
+        api_keys=COMMON_KEY,
+        admin_api_keys=COMMON_KEY,
+    ))
+    negado(COMMON_KEY)
+
+
+def test_valor_em_ambos_os_conjuntos_nao_contamina_os_demais(monkeypatch):
+    """One shared value is dropped; a genuinely separate credential still works."""
+    monkeypatch.setattr(admin, "settings", montar(
+        api_keys=COMMON_KEY,
+        admin_api_keys=f"{COMMON_KEY},{ADMIN_CRED}",
+    ))
+    negado(COMMON_KEY)
+    assert admin.require_admin_key(api_key=ADMIN_CRED) == ADMIN_CRED
+
+
+def test_separador_sujo_nao_abre_nem_quebra(monkeypatch):
+    """Stray commas and spaces are parsed, not turned into empty credentials."""
+    monkeypatch.setattr(admin, "settings", montar(
+        admin_api_keys=f" , {ADMIN_CRED} , , ",
+    ))
+    assert admin.require_admin_key(api_key=ADMIN_CRED) == ADMIN_CRED
+    for ausente in (None, "", " "):
+        negado(ausente)
+
+
+def test_apenas_virgulas_nao_autoriza(monkeypatch):
+    monkeypatch.setattr(admin, "settings", montar(admin_api_keys=" , , "))
+    for tentativa in (None, "", " ", ",", ADMIN_CRED):
+        negado(tentativa)
+
+
+# ── The settings property itself ──────────────────────────────────
+
+def test_conjuntos_sao_disjuntos_por_construcao():
+    s = montar(api_keys=f"{COMMON_KEY},{ADMIN_CRED}", admin_api_keys=ADMIN_CRED)
+    assert s.valid_admin_keys == frozenset()
+    assert s.valid_api_keys & s.valid_admin_keys == set()
+
+
+def test_admin_vazio_por_padrao():
+    assert montar().valid_admin_keys == frozenset()
+    assert montar(api_keys=COMMON_KEY).valid_admin_keys == frozenset()
+
+
+def test_comprimento_minimo_e_aplicado():
+    limite = "x" * ADMIN_KEY_MIN_LENGTH
+    curto  = "x" * (ADMIN_KEY_MIN_LENGTH - 1)
+    assert montar(admin_api_keys=limite).valid_admin_keys == frozenset({limite})
+    assert montar(admin_api_keys=curto).valid_admin_keys == frozenset()
 
 
 # ── No credential reaches stdout, stderr or logging ───────────────
 
 def _exercitar_todos_os_caminhos():
     """Runs every branch of require_admin_key, swallowing the 401s."""
-    for tentativa in (None, "", STATIC_KEY_A, STATIC_KEY_B, DYNAMIC_KEY, WRONG_KEY):
+    for tentativa in (None, "", ADMIN_CRED, ADMIN_CRED_2, COMMON_KEY,
+                      DYNAMIC_KEY, WRONG_KEY, SHORT_CRED):
         try:
             admin.require_admin_key(api_key=tentativa)
         except HTTPException:
             pass
 
 
-def test_no_credential_in_stdout_or_stderr(com_chaves, capsys):
+def test_recusa_nao_carrega_credencial(configurado):
+    erro = negado(WRONG_KEY)
+    for segredo in ALL_SECRETS:
+        assert segredo not in str(erro.detail)
+
+
+def test_recusa_nao_revela_o_estado_da_configuracao(configurado, monkeypatch):
+    """
+    Wrong credential and unconfigured server must look identical from outside,
+    or the error message becomes a probe for whether administration exists.
+    """
+    com = negado(WRONG_KEY)
+    monkeypatch.setattr(admin, "settings", montar(api_keys=COMMON_KEY))
+    sem = negado(WRONG_KEY)
+    assert (com.status_code, com.detail) == (sem.status_code, sem.detail)
+
+
+def test_nenhuma_credencial_em_stdout_ou_stderr(configurado, capsys):
     _exercitar_todos_os_caminhos()
     captured = capsys.readouterr()
     saida = captured.out + captured.err
     for segredo in ALL_SECRETS:
         assert segredo not in saida
-    # The configured set must not be emitted either, in any form.
+    assert "valid_admin_keys" not in saida
     assert "valid_api_keys" not in saida
-    assert "DEBUG" not in saida
     assert saida == ""
 
 
-def test_no_credential_in_stdout_when_api_keys_unset(sem_chaves, capsys):
+def test_nenhuma_credencial_em_stdout_com_configuracao_vazia(sem_administracao, capsys):
     _exercitar_todos_os_caminhos()
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == ""
 
 
-def test_no_credential_reaches_the_logging_module(com_chaves):
+def test_nenhuma_credencial_chega_ao_modulo_de_logging(configurado):
     buffer = io.StringIO()
     handler = logging.StreamHandler(buffer)
     handler.setLevel(logging.DEBUG)
@@ -147,15 +234,32 @@ def test_no_credential_reaches_the_logging_module(com_chaves):
         assert segredo not in registrado
 
 
-# ── Source-level guard against the print coming back ──────────────
+# ── Source-level guards ───────────────────────────────────────────
 
-def test_admin_module_has_no_print_calls():
-    """A regression guard: the leak was a bare print(), and it must not return."""
+def _arvore_do_admin():
     import ast
-
     caminho = importlib.util.find_spec("api.routers.admin").origin
     with open(caminho, encoding="utf-8") as fh:
-        arvore = ast.parse(fh.read())
+        return ast.parse(fh.read()), ast
+
+
+def test_admin_nao_consulta_o_conjunto_comum():
+    """
+    The regression that matters. `require_admin_key` once read
+    `settings.valid_api_keys`, which made every API key an admin credential.
+    No attribute of that name may be read anywhere in the module.
+    """
+    arvore, ast = _arvore_do_admin()
+    leituras = [
+        no.lineno for no in ast.walk(arvore)
+        if isinstance(no, ast.Attribute) and no.attr == "valid_api_keys"
+    ]
+    assert leituras == [], f"valid_api_keys read at lines {leituras}"
+
+
+def test_admin_module_has_no_print_calls():
+    """A regression guard: an earlier leak was a bare print(), and it must not return."""
+    arvore, ast = _arvore_do_admin()
     chamadas = [
         no for no in ast.walk(arvore)
         if isinstance(no, ast.Call)
@@ -167,17 +271,13 @@ def test_admin_module_has_no_print_calls():
 
 def test_admin_module_never_passes_a_credential_to_an_output_call():
     """
-    No print/log call anywhere in admin.py may take `api_key`, `valid_static_keys`
-    or `settings.valid_api_keys` as an argument — in full or wrapped in anything.
+    No print/log call anywhere in admin.py may take `api_key`, `credentials`,
+    `presented` or `admin_key` as an argument — in full or wrapped in anything.
     """
-    import ast
-
-    nomes_sensiveis = {"api_key", "valid_static_keys", "admin_key"}
+    nomes_sensiveis = {"api_key", "credentials", "presented", "expected", "admin_key"}
     saidas = {"print", "debug", "info", "warning", "error", "exception", "critical", "log"}
 
-    caminho = importlib.util.find_spec("api.routers.admin").origin
-    with open(caminho, encoding="utf-8") as fh:
-        arvore = ast.parse(fh.read())
+    arvore, ast = _arvore_do_admin()
 
     ofensas = []
     for no in ast.walk(arvore):
