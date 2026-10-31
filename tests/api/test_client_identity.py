@@ -310,6 +310,30 @@ def test_a_imagem_roda_um_unico_processo():
     assert "gunicorn" not in dockerfile
 
 
+def test_a_imagem_desliga_a_reescrita_do_uvicorn():
+    """
+    uvicorn ships its own X-Forwarded-For handling, on by default, trusting
+    `127.0.0.1` by default. It rewrites `scope["client"]` before any
+    dependency runs, so `request.client.host` is already whatever the header
+    said and the policy in `_client_ip` inspects a forgery.
+
+    Measured against a server started without this flag, limit 3/min:
+    six requests with six different forged headers all returned 200 — six
+    budgets bought with a string. With the flag, the same six share one.
+
+    Two trust policies mean the weaker one decides. There is one, and it is
+    `TRUSTED_PROXIES`.
+    """
+    dockerfile = (RAIZ / "Dockerfile").read_text(encoding="utf-8")
+    cmd = [l for l in dockerfile.splitlines() if l.startswith("CMD")]
+    assert cmd, "no CMD in the Dockerfile"
+    assert "--no-proxy-headers" in cmd[0], (
+        "uvicorn would rewrite request.client from X-Forwarded-For before "
+        "api.deps._client_ip could apply the trusted-proxy policy"
+    )
+    assert "--proxy-headers" not in cmd[0].replace("--no-proxy-headers", "")
+
+
 def test_o_estado_em_memoria_e_por_processo():
     """Stated as a test so the limitation is not folded away into a comment."""
     assert isinstance(deps._rate_state, dict)

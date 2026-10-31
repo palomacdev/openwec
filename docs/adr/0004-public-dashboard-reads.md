@@ -146,6 +146,31 @@ the proxy's bucket, which is safe and useless. The API logs
 the difference is invisible in any response and looks like the limit simply
 being too strict.
 
+**And the server must not have a policy of its own.** uvicorn ships
+`ProxyHeadersMiddleware`, enabled by default, trusting `127.0.0.1` by default.
+It rewrites `scope["client"]` from `X-Forwarded-For` before any dependency
+runs, so `request.client.host` is already whatever the header said and
+`_client_ip` inspects a forgery while believing it is the peer.
+
+Measured against a disposable server, anonymous limit 3/min, six requests with
+six different forged headers:
+
+| | result |
+|---|---|
+| uvicorn defaults | **200 ×6** — six budgets bought with a string |
+| `--no-proxy-headers` | 200, 200, 200, **429, 429, 429** — one budget |
+| `--no-proxy-headers`, `TRUSTED_PROXIES=127.0.0.1` | 200 ×6 — six real clients, six budgets |
+
+Two trust policies mean the weaker one decides. The image now starts uvicorn
+with `--no-proxy-headers`, a guard test keeps it there, and the only policy is
+`TRUSTED_PROXIES`.
+
+This was not visible in production, where the API is reached from the compose
+bridge rather than from `127.0.0.1`, so uvicorn's default list does not match.
+It was visible on a developer machine, in CI, and anywhere the proxy and the
+API share a loopback — which is to say, in the configurations where someone
+would first measure the limiter and conclude it worked.
+
 ### 3.4 Where the counters live
 
 Redis holds them, shared across processes. When Redis is unreachable the

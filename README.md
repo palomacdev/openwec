@@ -218,6 +218,10 @@ Anonymous requests are limited to 60 per minute per client address, and a `429`
 carries `Retry-After`. Sending a valid key lifts that limit; sending an invalid
 one is still refused.
 
+Which address counts is decided by `TRUSTED_PROXIES`, not by the request:
+`X-Forwarded-For` is read only when the connection came from a proxy listed
+there. Empty — the default — means it is ignored entirely.
+
 ### Protected endpoints (API key required)
 
 | Endpoint | Description |
