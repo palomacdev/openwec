@@ -56,8 +56,26 @@ _redis_client        = None
 # than failing over.
 _REDIS_RETRY_SECONDS = 30.0
 _REDIS_PROBE_TIMEOUT = 0.5
+
+# The ceiling on one Redis operation. This is the number that decides how long
+# a request waits when Redis dies under a client we already hold, so it is a
+# named constant and not a literal buried in a constructor.
+_REDIS_SOCKET_TIMEOUT = 1.0
+
 _redis_unavailable_until = 0.0
 _redis_fallback_logged   = False
+
+# `_redis_client`, the window and the logged flag are read on every request and
+# written by whichever thread notices a failure first. FastAPI runs these sync
+# dependencies in a threadpool, so "whichever thread" is literal. Assignment is
+# atomic in CPython, so a missing lock would not corrupt anything -- it would
+# let N threads all probe a dead Redis at once and log N warnings for one
+# outage. The lock covers the decisions, never the fast path.
+#
+# Reentrant because `_esquecer_redis` is reached both from inside the
+# acquisition (which already holds it) and from a request whose held client
+# just failed (which does not).
+_redis_lock = threading.RLock()
 
 
 def _porta_responde(host: str, port: int, timeout: float) -> bool:
@@ -93,6 +111,53 @@ def _porta_responde(host: str, port: int, timeout: float) -> bool:
     return bool(resultado) and resultado[0]
 
 
+def _erros_de_infra() -> tuple:
+    """
+    The exceptions that mean "Redis is not there", and only those.
+
+    `redis` is imported lazily everywhere in this module, so the tuple is
+    built on demand rather than at import. Everything else -- a TypeError, a
+    KeyError, an AttributeError -- is a bug in the code below, and a bug must
+    not be dressed up as an outage.
+    """
+    try:
+        import redis
+        return (redis.RedisError, OSError)
+    except Exception:
+        return (OSError,)
+
+
+def _resolver(host: str, timeout: float) -> str | None:
+    """
+    The host's address, looked up once and bounded by the clock.
+
+    The name is resolved at acquisition so that it never has to be resolved
+    again while the client is in use. Measured against a stopped container,
+    where the name stops resolving: an operation on a client built from the
+    name fails in 2.58s, all of it in the resolver; the same operation on a
+    client built from the address fails in 1.004s, which is exactly the
+    socket timeout we asked for. One number is ours, the other is the
+    resolver's, and only ours can be promised.
+
+    A Redis that comes back at a different address makes the held client
+    fail, which drops it; the next acquisition resolves the name again.
+    """
+    resultado: list[str] = []
+
+    def tentar():
+        try:
+            infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+            if infos:
+                resultado.append(infos[0][4][0])
+        except OSError:
+            pass
+
+    t = threading.Thread(target=tentar, daemon=True)
+    t.start()
+    t.join(timeout)
+    return resultado[0] if resultado else None
+
+
 def _esquecer_redis(motivo: str) -> None:
     """
     Drop the cached client and stop trying for a while.
@@ -101,12 +166,17 @@ def _esquecer_redis(motivo: str) -> None:
     stops working, which is the case the cache made invisible.
     """
     global _redis_client, _redis_unavailable_until, _redis_fallback_logged
-    _redis_client = None
-    _redis_unavailable_until = time.time() + _REDIS_RETRY_SECONDS
-    if not _redis_fallback_logged:
-        # Once per outage, not once per request. No address or credential in
-        # the record -- only the consequence, which is the part an operator
-        # needs.
+    with _redis_lock:
+        _redis_client = None
+        _redis_unavailable_until = time.time() + _REDIS_RETRY_SECONDS
+        primeiro = not _redis_fallback_logged
+        _redis_fallback_logged = True
+
+    if primeiro:
+        # Once per outage, not once per request, and decided under the lock so
+        # that two threads meeting the same outage do not both report it. No
+        # address or credential in the record -- only the consequence, which
+        # is the part an operator needs.
         logger.warning(
             "rate_limit_degraded",
             extra={
@@ -115,38 +185,66 @@ def _esquecer_redis(motivo: str) -> None:
                 "retry_seconds": _REDIS_RETRY_SECONDS,
             },
         )
-        _redis_fallback_logged = True
 
 
 def _get_redis():
     """Returns a Redis client, or None if Redis is not available."""
-    global _redis_client, _redis_unavailable_until, _redis_fallback_logged
-    if _redis_client is not None:
-        return _redis_client
+    global _redis_client, _redis_fallback_logged
 
-    agora = time.time()
-    if agora < _redis_unavailable_until:
-        return None
+    # Fast path, deliberately outside the lock: reading a module global is
+    # atomic, and a request that already has a working client must not queue
+    # behind anything.
+    cliente = _redis_client
+    if cliente is not None:
+        return cliente
 
-    try:
-        import redis
-        if not _porta_responde(settings.redis_host, settings.redis_port,
-                               _REDIS_PROBE_TIMEOUT):
-            raise OSError("no answer on the Redis port")
-        r = redis.Redis(
-            host=settings.redis_host,
-            port=settings.redis_port,
-            decode_responses=True,
-            socket_connect_timeout=1,
-            socket_timeout=1,
-        )
-        r.ping()
-        _redis_client = r
-        _redis_fallback_logged = False
-        return r
-    except Exception:
-        _esquecer_redis("redis_unavailable")
-        return None
+    with _redis_lock:
+        # Re-read inside the lock: another thread may have acquired while
+        # this one waited, and probing twice for one outage is the cost the
+        # lock exists to avoid.
+        if _redis_client is not None:
+            return _redis_client
+        if time.time() < _redis_unavailable_until:
+            return None
+
+        try:
+            import redis
+            from redis.backoff import NoBackoff
+            from redis.retry import Retry
+
+            endereco = _resolver(settings.redis_host, _REDIS_PROBE_TIMEOUT)
+            if endereco is None:
+                raise OSError("Redis host did not resolve")
+            if not _porta_responde(endereco, settings.redis_port,
+                                   _REDIS_PROBE_TIMEOUT):
+                raise OSError("no answer on the Redis port")
+
+            r = redis.Redis(
+                host=endereco,
+                port=settings.redis_port,
+                decode_responses=True,
+                socket_connect_timeout=_REDIS_SOCKET_TIMEOUT,
+                socket_timeout=_REDIS_SOCKET_TIMEOUT,
+                # redis-py 8 ships `Retry(ExponentialWithJitterBackoff(), 10)`
+                # by default. Measured against a stopped Redis, one INCR on a
+                # held client took **29.4 seconds** -- eleven attempts, each
+                # paying a failed name lookup, with backoff sleeps between.
+                # The socket timeouts above do not touch that: the time is
+                # spent resolving and sleeping, not connecting.
+                #
+                # A rate limiter has no business retrying. It is advisory, it
+                # has a fallback, and it sits in front of every public read.
+                # One attempt, no backoff: the same INCR then fails in 1.004s.
+                retry=Retry(NoBackoff(), 0),
+                retry_on_error=[],
+            )
+            r.ping()
+            _redis_client = r
+            _redis_fallback_logged = False
+            return r
+        except Exception:
+            _esquecer_redis("redis_unavailable")
+            return None
 
 
 def _key_hash(api_key: str) -> str:
@@ -156,6 +254,12 @@ def _key_hash(api_key: str) -> str:
 # Fallback in-memory store (single process, dev only)
 _rate_state: dict[str, tuple[int, float]] = {}
 _rate_limit_hits: dict[str, int] = {}   # tracks 429s for alerting
+
+# When the in-memory state reaches this many keys, expired windows are swept
+# before the next one is recorded. Not a limit on concurrent clients -- a
+# sweep threshold, so the dictionary stays proportional to recent traffic
+# instead of to everything the process has ever seen.
+_MEMORY_STATE_SOFT_MAX = 2048
 
 
 def _fire_rate_limit_alert(api_key: str, limit: int, window: str):
@@ -198,9 +302,33 @@ def _check_rate_limit_redis(r, api_key: str, limit_per_minute: int):
         )
 
 
+def _podar_estado_em_memoria(now: float) -> None:
+    """
+    Drop windows that have expired.
+
+    `_rate_state` used to grow for the life of the process, one entry per
+    key. That was harmless while the only keys were a handful of dynamic API
+    keys. The public reads changed the shape: the key is now the client
+    address, so a Redis outage on a public site means one entry per visitor,
+    kept forever.
+
+    An expired window carries no information -- the next request through it
+    resets the count anyway -- so pruning is free and changes no behaviour.
+    """
+    expirados = [
+        k for k, (_, inicio) in _rate_state.items()
+        if now - inicio >= _RATE_WINDOW_SECONDS
+    ]
+    for k in expirados:
+        _rate_state.pop(k, None)
+        _rate_limit_hits.pop(k, None)
+
+
 def _check_rate_limit_memory(api_key: str, limit_per_minute: int):
     """In-memory fixed-window rate limiter (dev fallback)."""
     now = time.time()
+    if len(_rate_state) >= _MEMORY_STATE_SOFT_MAX:
+        _podar_estado_em_memoria(now)
     count, window_start = _rate_state.get(api_key, (0, now))
     if now - window_start >= _RATE_WINDOW_SECONDS:
         count, window_start = 0, now
@@ -260,7 +388,7 @@ def _check_rate_limit(api_key: str, limit_per_minute: int,
         # for an outage -- catching it would hand every rate-limited caller
         # a free pass.
         raise
-    except Exception:
+    except _erros_de_infra():
         # A client acquired while Redis was healthy keeps being handed out by
         # the cache, and its first failure used to escape as a 500. Measured
         # against a stopped Redis container: `redis.exceptions.ConnectionError
@@ -269,6 +397,10 @@ def _check_rate_limit(api_key: str, limit_per_minute: int,
         # never ran, because it only ever applied at acquisition time.
         #
         # Losing Redis must cost shared counting, not availability.
+        #
+        # Narrow on purpose. A TypeError in the code below is a bug, and
+        # degrading quietly would hide it behind a warning that says the
+        # infrastructure is at fault. Bugs keep their 500.
         _esquecer_redis("redis_connection_lost")
         _check_rate_limit_memory(api_key, limit_per_minute)
 
