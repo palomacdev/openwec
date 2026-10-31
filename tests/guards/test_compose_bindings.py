@@ -7,9 +7,16 @@ password — both `openwec`, both written in the compose file — so publishing 
 to every interface puts a superuser shell on the network for anyone who can
 reach the machine.
 
-Measured on this machine before the fix: the historical copy authenticated over
-the Wi-Fi address with those credentials; the clusters bound to `127.0.0.1:`
-refused the same connection.
+Measured on this machine before the fix, from this machine: the historical copy
+accepted a connection on the Wi-Fi address with those credentials, and the
+clusters bound to `127.0.0.1:` refused the same one. That is the binding doing
+exactly what it says. It is not a claim that another machine could reach it --
+the host firewall there blocked inbound to the Docker backend, so the exposure
+was latent. A latent exposure held open by a firewall rule is still worth
+closing at the line that does not depend on the firewall.
+
+The same file also fixes how long the database gets to shut down; see the
+second half of this module.
 
 The host field must also be a **literal**. `${DB_BIND_HOST:-127.0.0.1}` looks
 careful and is a wider default one environment variable away — set by a stray
@@ -219,3 +226,107 @@ def test_db_bind_host_no_ambiente_nao_muda_a_interface():
     saida = _resolve({"DB_BIND_HOST": "0.0.0.0"})
     assert "host_ip: 127.0.0.1" in saida
     assert "0.0.0.0" not in saida
+
+
+# ── Shutdown gets time to finish ──────────────────────────────────
+#
+# The image stops on SIGINT, which Postgres reads as a fast shutdown: it still
+# has to flush buffers and write a shutdown checkpoint. Docker sends SIGKILL
+# when the grace period runs out, and an undeclared grace period is whatever
+# the daemon decides. Measured on the machine that prompted this: one second,
+# on every container, and 25 starts reporting automatic recovery against one
+# clean shutdown.
+#
+# Crash recovery has replayed the WAL every time, so the symptom is invisible
+# until the once it is not. These tests keep the declaration in the file.
+
+GRACA_MINIMA = 60  # seconds
+
+DURACAO = re.compile(r"(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?")
+
+
+def segundos(valor: str) -> int:
+    """Seconds in a compose duration: `120`, `120s`, `2m`, `2m0s`, `1h30m`."""
+    texto = valor.strip().strip("\"'")
+    if texto.isdigit():
+        return int(texto)
+    m = DURACAO.fullmatch(texto)
+    if not m or not any(m.groups()):
+        raise ValueError(f"unreadable duration: {valor!r}")
+    horas, minutos, segs = (int(g or 0) for g in m.groups())
+    return horas * 3600 + minutos * 60 + segs
+
+
+def chave_do_servico(caminho: pathlib.Path, servico: str, chave: str):
+    """
+    The value of one top-level key of one service, or None.
+
+    Hand-parsed for the same reason the port reader above is: the guard reads
+    the file as written, so a key that only appears after an override or a
+    merge does not count as present.
+    """
+    dentro = False
+    recuo = None
+    for linha in caminho.read_text(encoding="utf-8").splitlines():
+        despido = linha.strip()
+        if not despido or despido.startswith("#"):
+            continue
+        atual = len(linha) - len(linha.lstrip())
+        if despido == f"{servico}:":
+            dentro, recuo = True, atual
+            continue
+        if dentro:
+            if atual <= recuo:
+                break
+            if atual == recuo + 2 and despido.startswith(f"{chave}:"):
+                return despido.split(":", 1)[1].strip()
+    return None
+
+
+def test_o_banco_declara_quanto_tempo_tem_para_desligar():
+    declarado = chave_do_servico(DEV, "db", "stop_grace_period")
+    assert declarado is not None, (
+        "docker/docker-compose.yml: service `db` declares no stop_grace_period, "
+        "so the shutdown window is whatever the daemon defaults to"
+    )
+    assert segundos(declarado) >= GRACA_MINIMA, (
+        f"stop_grace_period is {declarado} — too short for a multi-gigabyte "
+        f"cluster to write its shutdown checkpoint"
+    )
+
+
+def test_o_guarda_le_as_formas_de_duracao():
+    """The guard is only worth having if it reads what compose accepts."""
+    assert segundos("2m") == 120
+    assert segundos("2m0s") == 120
+    assert segundos("120s") == 120
+    assert segundos("120") == 120
+    assert segundos("1h30m") == 5400
+    assert segundos('"2m"') == 120
+
+    # And it must call the short ones short, which is the regression it exists
+    # to catch.
+    assert segundos("1s") < GRACA_MINIMA
+    assert segundos("10s") < GRACA_MINIMA
+    assert segundos("10") < GRACA_MINIMA
+
+    for ruim in ("", "dois minutos", "m", "2x"):
+        with pytest.raises(ValueError):
+            segundos(ruim)
+
+
+def test_o_leitor_de_chaves_nao_atravessa_servicos():
+    """A key read from the wrong service would make the guard above a lie."""
+    assert chave_do_servico(DEV, "db", "container_name") == "openwec-db"
+    assert chave_do_servico(DEV, "db", "restart") == "unless-stopped"
+    assert chave_do_servico(DEV, "db", "chave_que_nao_existe") is None
+    assert chave_do_servico(DEV, "servico_que_nao_existe", "restart") is None
+
+
+@precisa_docker
+def test_compose_config_resolve_o_tempo_de_desligamento():
+    saida = _resolve()
+    linha = [l for l in saida.splitlines() if "stop_grace_period" in l]
+    assert linha, "compose resolved no stop_grace_period for the service"
+    valor = linha[0].split(":", 1)[1].strip()
+    assert segundos(valor) >= GRACA_MINIMA, f"compose resolved {valor}"

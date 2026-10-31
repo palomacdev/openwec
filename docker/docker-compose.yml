@@ -12,6 +12,24 @@ services:
     image: timescale/timescaledb:latest-pg16
     container_name: openwec-db
     restart: unless-stopped
+
+    # How long Postgres gets to finish its checkpoint before Docker sends
+    # SIGKILL. The image's stop signal is SIGINT, which Postgres reads as a
+    # fast shutdown: it still has to flush and write the shutdown checkpoint.
+    #
+    # Without this line the container inherits whatever the daemon decides.
+    # Measured on this machine, that was `StopTimeout=1` -- one second for a
+    # 1.2 GB cluster -- on every container, not just this one. The log of the
+    # historical copy showed 25 starts reporting `database system was not
+    # properly shut down; automatic recovery in progress` against a single
+    # clean shutdown. WAL replay has carried it every time, which is luck
+    # repeated rather than a design.
+    #
+    # Two minutes is not a wait; it is a ceiling. A healthy shutdown of this
+    # cluster takes seconds, and the container stops as soon as the process
+    # exits.
+    stop_grace_period: 2m
+
     environment:
       POSTGRES_USER:     ${DB_USER:-openwec}
       POSTGRES_PASSWORD: ${DB_PASSWORD:-openwec}
@@ -24,8 +42,16 @@ services:
       # Without one, Docker publishes on 0.0.0.0 and ::, and this database
       # answers to anyone who can reach the machine on this port -- with the
       # development superuser and the development password, which are both
-      # `openwec` and both written above. Measured on the machine where this
-      # was found: it authenticated over the Wi-Fi address.
+      # `openwec` and both written above.
+      #
+      # Measured on the machine where this was found, from that machine: the
+      # port published on 0.0.0.0 accepted a connection on the Wi-Fi address
+      # and a port published on 127.0.0.1 refused the same one. That is what
+      # the binding does. It is NOT a measurement from another machine -- the
+      # host firewall there happened to block inbound to the Docker backend,
+      # so the exposure was latent rather than live. Latent is not a reason
+      # to leave it: the firewall is one network-category change away from
+      # not applying, and this line is the part that does not depend on it.
       #
       # It was briefly a `${DB_BIND_HOST:-127.0.0.1}` variable. That is a
       # wider default one environment variable away, set by a stray export or
