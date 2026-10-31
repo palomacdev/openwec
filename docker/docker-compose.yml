@@ -19,14 +19,35 @@ services:
       LANG: en_US.utf8
       LC_ALL: en_US.utf8
     ports:
-      # Bind the host interface explicitly. Without one, Docker publishes on
-      # 0.0.0.0 and ::, and this database answers to anyone who can reach the
-      # machine on this port -- with the development superuser and the
-      # development password, which are both `openwec` and both in this file.
+      # The host interface is written here, literally, and is not a variable.
       #
-      # Override only with a reason, and never with 0.0.0.0:
-      #   DB_BIND_HOST=172.30.224.1  # reach it from WSL
-      - "${DB_BIND_HOST:-127.0.0.1}:${DB_PORT:-5433}:5432"
+      # Without one, Docker publishes on 0.0.0.0 and ::, and this database
+      # answers to anyone who can reach the machine on this port -- with the
+      # development superuser and the development password, which are both
+      # `openwec` and both written above. Measured on the machine where this
+      # was found: it authenticated over the Wi-Fi address.
+      #
+      # It was briefly a `${DB_BIND_HOST:-127.0.0.1}` variable. That is a
+      # wider default one environment variable away, set by a stray export or
+      # an inherited shell, with no diff to review and nothing on screen to
+      # say it happened. The port stays where it can be read.
+      #
+      # If you genuinely need the database from another interface -- from WSL,
+      # say -- do not change this line. Write an override file and pass it
+      # explicitly, so that reaching outside the machine is one visible
+      # command rather than an ambient variable:
+      #
+      #   # docker/docker-compose.expose.yml   (untracked, yours)
+      #   services:
+      #     db:
+      #       ports: !override ["172.30.224.1:${DB_PORT:-5433}:5432"]
+      #
+      #   docker compose -f docker/docker-compose.yml       #                  -f docker/docker-compose.expose.yml up -d
+      #
+      # No consumer in this repository needs that: every one uses localhost,
+      # no container shares a network with `openwec-db`, and CI runs its own
+      # service container.
+      - "127.0.0.1:${DB_PORT:-5433}:5432"
     volumes:
       - db_data:/var/lib/postgresql/data
       - ../database/schema.sql:/docker-entrypoint-initdb.d/schema.sql
