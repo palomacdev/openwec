@@ -46,7 +46,13 @@ services:
     restart: unless-stopped
     env_file: .env
     depends_on:
+      # Redis holds the shared rate-limit counters. Without it the API falls
+      # back to per-process counting, which multiplies every limit by the
+      # number of workers. `depends_on` only orders start-up -- neither
+      # service declares a healthcheck -- so this narrows the window rather
+      # than closing it.
       - db
+      - redis
     ports:
       - "127.0.0.1:8000:8000"
 

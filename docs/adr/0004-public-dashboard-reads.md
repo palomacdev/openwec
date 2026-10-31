@@ -111,13 +111,63 @@ here. What exists is public race data and a static page.
 | static key | unmetered | unchanged |
 | dynamic key | its own `requests_per_minute` and quotas | unchanged |
 
-The address is taken from the **last** entry of `X-Forwarded-For`, because
-nginx appends the peer it actually saw; reading the first entry would meter
-whatever the client invented.
-
 These limits dampen abuse. They are not a security control, and this document
 does not pretend otherwise — an address can be changed. The data behind them is
 public by decision, which is what makes that acceptable.
+
+### 3.3 Which address, and who says so
+
+`X-Forwarded-For` is a request header. Any caller can send one, and a caller
+that reaches the API without passing through nginx sends whatever it likes.
+The API port is published on `127.0.0.1:8000`, so that caller is not the
+internet — but it is any process on the host and any container on its bridge
+networks, which is not nobody.
+
+Reading the header unconditionally is wrong from either end. Measured against
+both implementations:
+
+| | first entry | last entry | trusted-proxy policy |
+|---|---|---|---|
+| direct caller forging a header | believes the forgery | **believes the forgery** | meters the caller |
+| direct caller impersonating the proxy | believes it | **believes it** | meters the caller |
+| real chain through nginx | believes the client's own first entry | **meters nginx, so everyone shares one bucket** | meters the client |
+| unknown intermediate in the chain | believes everything past it | meters nginx | meters the intermediate |
+
+So the header is read only when the peer that opened the connection is listed
+in `TRUSTED_PROXIES`. The chain is then walked from the right, discarding hops
+that are also ours, and the first address that is not one of ours is the
+client. Everything to its left was written by somebody we have no reason to
+believe. A hop that does not parse stops the walk rather than guessing.
+
+`TRUSTED_PROXIES` is **empty by default**, and empty means the header is never
+read. Nothing can be forged — and behind a reverse proxy every caller shares
+the proxy's bucket, which is safe and useless. The API logs
+`trusted_proxies_unset` at start-up for exactly as long as that is true, since
+the difference is invisible in any response and looks like the limit simply
+being too strict.
+
+### 3.4 Where the counters live
+
+Redis holds them, shared across processes. When Redis is unreachable the
+limiter falls back to an in-memory counter, which counts **per process**.
+
+Two consequences, both recorded rather than hidden:
+
+- **The image starts one uvicorn process** and declares no `--workers`, so the
+  fallback is consistent today. A guard test fails if that changes, because
+  N workers would mean N times every limit while Redis is down.
+- **An unreachable Redis used to cost seconds per request.** Measured against a
+  port that drops packets instead of refusing them, `socket_connect_timeout=1`
+  produced a **15.17 second** failure — the client library's retries
+  multiplying what read like a one-second bound — and the failure was not
+  remembered, so every request paid it again. The probe is now a plain connect
+  bounded at 0.5 s, and a failure is remembered for 30 s: 0.64 s once, then
+  0.000 ms. One `rate_limit_degraded` warning per outage says the limits have
+  stopped being shared.
+
+The operational answer to both is the same: keep Redis up. `docker-compose.prod.yml`
+now orders it before the API, which narrows the start-up window without closing
+it — neither service declares a healthcheck.
 
 ---
 

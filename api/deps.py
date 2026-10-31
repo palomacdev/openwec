@@ -4,7 +4,9 @@ Reusable FastAPI dependencies for DB connection and authentication.
 """
 
 import hashlib
+import ipaddress
 import logging
+import socket
 import time
 from typing import Generator
 from fastapi import Depends, HTTPException, Request, Security, status
@@ -48,24 +50,72 @@ _RATE_WINDOW_SECONDS = 60
 _ALERT_THRESHOLD     = 10   # log warning after this many 429s in one window
 _redis_client        = None
 
+# How long a failed probe is remembered. Without this, every request retries
+# the connection, and an unreachable Redis costs seconds per request rather
+# than failing over.
+_REDIS_RETRY_SECONDS = 30.0
+_REDIS_PROBE_TIMEOUT = 0.5
+_redis_unavailable_until = 0.0
+_redis_fallback_logged   = False
+
+
+def _porta_responde(host: str, port: int, timeout: float) -> bool:
+    """
+    A bounded TCP probe, because the client library's own timeout is not one.
+
+    Measured against a port that black-holes packets rather than refusing
+    them: `socket_connect_timeout=1` produced a **15 second** failure, the
+    library's retries multiplying what looked like a one-second bound. Every
+    request would pay that. This probe is bounded by us.
+    """
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
 
 def _get_redis():
     """Returns a Redis client, or None if Redis is not available."""
-    global _redis_client
+    global _redis_client, _redis_unavailable_until, _redis_fallback_logged
     if _redis_client is not None:
         return _redis_client
+
+    agora = time.time()
+    if agora < _redis_unavailable_until:
+        return None
+
     try:
         import redis
+        if not _porta_responde(settings.redis_host, settings.redis_port,
+                               _REDIS_PROBE_TIMEOUT):
+            raise OSError("no answer on the Redis port")
         r = redis.Redis(
             host=settings.redis_host,
             port=settings.redis_port,
             decode_responses=True,
             socket_connect_timeout=1,
+            socket_timeout=1,
         )
         r.ping()
         _redis_client = r
+        _redis_fallback_logged = False
         return r
     except Exception:
+        _redis_unavailable_until = agora + _REDIS_RETRY_SECONDS
+        if not _redis_fallback_logged:
+            # Once per outage, not once per request. No address or credential
+            # in the record -- only the consequence, which is the part an
+            # operator needs.
+            logger.warning(
+                "rate_limit_degraded",
+                extra={
+                    "reason":        "redis_unavailable",
+                    "effect":        "limits are per process, not shared",
+                    "retry_seconds": _REDIS_RETRY_SECONDS,
+                },
+            )
+            _redis_fallback_logged = True
         return None
 
 
@@ -260,18 +310,76 @@ PUBLIC_RATE_LIMIT_PER_MINUTE  = 60
 PUBLIC_WRITE_LIMIT_PER_MINUTE = 5
 
 
+def _parse_address(texto: str):
+    """An IP address, or None. Tolerates `[::1]` and a trailing `:port`."""
+    texto = texto.strip()
+    if not texto:
+        return None
+    if texto.startswith("[") and "]" in texto:
+        texto = texto[1:texto.index("]")]
+    try:
+        return ipaddress.ip_address(texto)
+    except ValueError:
+        pass
+    # `1.2.3.4:5678` — a form some proxies emit. Bare IPv6 also contains
+    # colons, so only strip a suffix when what remains parses.
+    if texto.count(":") == 1:
+        try:
+            return ipaddress.ip_address(texto.rsplit(":", 1)[0])
+        except ValueError:
+            return None
+    return None
+
+
+def _is_trusted(endereco, redes) -> bool:
+    return any(endereco in rede for rede in redes)
+
+
 def _client_ip(request: Request) -> str:
     """
-    The address to meter. Takes the *last* entry of X-Forwarded-For, not the
-    first: nginx appends the peer it actually saw, so anything a client puts in
-    that header ahead of it is its own invention.
+    The address to meter, under an explicit trusted-proxy policy.
+
+    `X-Forwarded-For` is a request header: any caller can send one, and a
+    caller that reaches the API without going through the proxy sends whatever
+    it likes. Reading it unconditionally — from either end of the list — lets
+    one caller spend another's budget, or escape its own by rotating a string.
+
+    So the header is read only when the peer that actually opened the
+    connection is a proxy we named in `TRUSTED_PROXIES`. The list is then
+    walked from the right, discarding the hops we also trust, and the first
+    address that is not one of ours is the client. Everything to the left of it
+    was written by somebody we have no reason to believe, and is ignored.
+
+    With `TRUSTED_PROXIES` empty the header is never read. Nothing can be
+    forged, and behind a reverse proxy every caller shares one bucket — safe,
+    and visibly wrong, which is what the start-up warning is for.
     """
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        ultimo = forwarded.split(",")[-1].strip()
-        if ultimo:
-            return ultimo
-    return getattr(request.client, "host", None) or "unknown"
+    peer_bruto = getattr(request.client, "host", None)
+    peer = _parse_address(peer_bruto) if peer_bruto else None
+    if peer is None:
+        # No peer address at all (ASGI transports that do not provide one).
+        # There is nothing to meter and nothing to believe.
+        return "unknown"
+
+    redes = settings.trusted_proxy_networks
+    if not redes or not _is_trusted(peer, redes):
+        return str(peer)
+
+    encaminhados = request.headers.get("X-Forwarded-For")
+    if not encaminhados:
+        return str(peer)
+
+    for bruto in reversed(encaminhados.split(",")):
+        endereco = _parse_address(bruto)
+        if endereco is None:
+            # A malformed hop. We cannot tell where the real client sits in
+            # the rest of the list, so we stop and meter the proxy.
+            return str(peer)
+        if not _is_trusted(endereco, redes):
+            return str(endereco)
+
+    # Every hop was one of ours. Meter the nearest one.
+    return str(peer)
 
 
 def allow_public_read(

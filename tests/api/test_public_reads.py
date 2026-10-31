@@ -182,34 +182,8 @@ def test_escrita_publica_e_limitada(cliente, monkeypatch):
     assert all(s != 429 for s in vistos[:2])
 
 
-# ── Which address gets metered ────────────────────────────────────
-
-def _pedido(forwarded=None, peer="203.0.113.9"):
-    headers = {"X-Forwarded-For": forwarded} if forwarded else {}
-    return types.SimpleNamespace(
-        headers=headers,
-        client=types.SimpleNamespace(host=peer),
-    )
-
-
-def test_endereco_vem_do_ultimo_forwarded_for():
-    """
-    nginx appends the peer it actually saw. Taking the first entry would meter
-    whatever the client invented, which is the same as not metering at all.
-    """
-    assert deps._client_ip(_pedido("1.2.3.4, 198.51.100.7")) == "198.51.100.7"
-    assert deps._client_ip(_pedido("198.51.100.7")) == "198.51.100.7"
-
-
-def test_endereco_cai_para_o_peer_sem_cabecalho():
-    assert deps._client_ip(_pedido()) == "203.0.113.9"
-    assert deps._client_ip(_pedido(forwarded="  ")) == "203.0.113.9"
-
-
-def test_endereco_nunca_fica_vazio():
-    sem_cliente = types.SimpleNamespace(headers={}, client=None)
-    assert deps._client_ip(sem_cliente) == "unknown"
-
+# Which address gets metered, and what happens when Redis is gone, live in
+# tests/api/test_client_identity.py.
 
 # ── The bundle may not carry a credential ─────────────────────────
 
