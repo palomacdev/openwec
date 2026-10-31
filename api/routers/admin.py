@@ -1,12 +1,14 @@
 """
 OpenWEC API — Admin Router
-Protected admin endpoints. Requires static admin API key (API_KEYS env var).
+Admin endpoints. Authorized by ADMIN_API_KEYS, and by nothing else.
 
 Endpoints:
     POST /admin/keys/{api_key}/revoke  ← instant key revocation
     GET  /admin/keys                   ← list all keys
     GET  /admin/keys/pending           ← list pending keys
 """
+
+import hmac
 
 from fastapi import APIRouter, Depends, HTTPException, Security, status
 from fastapi.security import APIKeyHeader
@@ -17,20 +19,48 @@ from api.config import settings
 
 router = APIRouter(tags=["Admin"])
 
-api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+# A header of its own. An API key sent in X-API-Key cannot reach this check
+# even by accident, and a client written for the public API cannot stumble
+# into administration by reusing its own request helper.
+admin_key_header = APIKeyHeader(name="X-Admin-Key", auto_error=False)
 
 
-def require_admin_key(api_key: str = Security(api_key_header)):
-    """Only static admin keys (API_KEYS env var) can access admin endpoints."""
-    valid_static_keys = settings.valid_api_keys
+def require_admin_key(api_key: str = Security(admin_key_header)):
+    """
+    Authorizes /admin/* against ADMIN_API_KEYS alone.
 
-    # Never log the received key or the configured key set -- not in full,
-    # not masked, not hashed, not a prefix. Any representation derived from
-    # a credential still narrows the search space for whoever reads the log.
-    if not valid_static_keys or not api_key or api_key not in valid_static_keys:
+    Never against API_KEYS. These routes return every issued key in plaintext,
+    with the requester's name and e-mail, and can revoke any of them; a
+    credential that may legitimately sit in a public JavaScript bundle must not
+    reach them. `settings.valid_admin_keys` also drops any value that appears
+    in both sets, so the two cannot be silently merged by configuration.
+
+    Fail-closed: an absent, short or unparseable ADMIN_API_KEYS yields an empty
+    set, and the loop below then rejects everything, including a correct
+    credential. Unavailable is the right answer when we cannot tell who is
+    asking.
+
+    Never log the received key or the configured credentials -- not in full,
+    not masked, not hashed, not a prefix. Any representation derived from a
+    credential still narrows the search space for whoever reads the log.
+    """
+    credentials = settings.valid_admin_keys
+    presented = (api_key or "").encode()
+
+    # Compared in constant time, and without an early exit, so neither the
+    # timing of a single comparison nor the number of comparisons performed
+    # reveals how far a guess got.
+    authorized = False
+    for expected in credentials:
+        if hmac.compare_digest(presented, expected.encode()):
+            authorized = True
+
+    if not authorized:
+        # One message for every failure: wrong credential, missing credential
+        # and unconfigured server are indistinguishable from outside.
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Admin API key required.",
+            detail="Admin credential required.",
         )
     return api_key
 
