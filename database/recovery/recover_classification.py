@@ -950,7 +950,8 @@ def drop_lap_shaped_results(cur, session_id: int, keep: list[int]) -> tuple[int,
 def recover_session(cur, session_id: int, rows: list[dict], series_key: str,
                     plan: Plan, allow_new_drivers: bool = False,
                     allow_team_fill: bool = False,
-                    manifest=None, slot_context=None) -> dict:
+                    manifest=None, slot_context=None,
+                    source_url: str | None = None) -> dict:
     """
     Applies the plan. The caller owns the transaction.
 
@@ -959,6 +960,12 @@ def recover_session(cur, session_id: int, rows: list[dict], series_key: str,
     DELETE, whoever calls this. The driver gate sits beside it for the same
     reason, and before the DELETE for a sharper one: a run that stops here
     has removed nothing.
+
+    `source_url` is written onto every result this routine writes, and is
+    `None` unless the caller proved which publication the bytes came from.
+    The row is the only place a reader of the database can learn that, and
+    a URL asserted without that proof would be worse than a null: it would
+    look like provenance.
     """
     assert_complete_match(plan)
 
@@ -989,6 +996,10 @@ def recover_session(cur, session_id: int, rows: list[dict], series_key: str,
     pilotos_ambiguos = 0
     pilotos_na_fonte = 0
     pilotos_por_manifesto = 0
+    # Which rows *this* transaction put in `drivers`. Counting the table
+    # before and after would measure every other connection too, and
+    # `drivers` is global.
+    pilotos_criados: set[int] = set()
 
     for numero in sorted(identidades, key=lambda n: int(n) if n.isdigit() else 0):
         row = por_numero[numero]
@@ -1024,7 +1035,7 @@ def recover_session(cur, session_id: int, rows: list[dict], series_key: str,
         if equipe:
             equipes_divergentes[numero] = equipe
 
-        result_id = insert_result(cur, session_id, car_id, row)
+        result_id = insert_result(cur, session_id, car_id, row, source_url)
         if result_id is None:
             continue
         gravados += 1
@@ -1044,6 +1055,8 @@ def recover_session(cur, session_id: int, rows: list[dict], series_key: str,
             driver_id, desfecho = upsert_driver(cur, piloto)
             if driver_id:
                 ligados.append((piloto["slot"], driver_id))
+                if desfecho is DriverOutcome.NOT_FOUND:
+                    pilotos_criados.add(driver_id)
             elif desfecho is DriverOutcome.MULTIPLE_CANDIDATES:
                 pilotos_ambiguos += 1
         if ligados:
@@ -1064,6 +1077,8 @@ def recover_session(cur, session_id: int, rows: list[dict], series_key: str,
         "pilotos_ligados": pilotos_ligados,
         "pilotos_ambiguos": pilotos_ambiguos,
         "pilotos_por_manifesto": pilotos_por_manifesto,
+        "pilotos_criados": len(pilotos_criados),
+        "ids_dos_pilotos_criados": sorted(pilotos_criados),
     }
 
 
@@ -1072,7 +1087,8 @@ def recover_session(cur, session_id: int, rows: list[dict], series_key: str,
 def run(session_id: int, csv_path: Path, series_key: str,
         dry_run: bool = False, allow_new_drivers: bool = False,
         allow_team_fill: bool = False, manifest_path: Path | None = None,
-        publication_url: str | None = None) -> dict:
+        publication_url: str | None = None,
+        publication_sha256: str | None = None) -> dict:
     import psycopg2
 
     import hashlib
@@ -1087,6 +1103,24 @@ def run(session_id: int, csv_path: Path, series_key: str,
             "--manifest exige --publication-url: a decisao foi tomada sobre "
             "uma publicacao, e e contra ela que a entrada e conferida")
     digest = hashlib.sha256(csv_path.read_bytes()).hexdigest()
+
+    # A URL so vira proveniencia gravada quando os bytes lidos sao os da
+    # publicacao declarada. Sem o digest ao lado dela, a URL seria uma
+    # afirmacao sobre um arquivo que ninguem conferiu.
+    if publication_url and not publication_sha256:
+        raise RecoveryBlocked(
+            "--publication-url exige --publication-sha256: a URL so e "
+            "gravada quando o arquivo lido confere com a publicacao")
+    if publication_sha256:
+        declarado = publication_sha256.strip().lower()
+        if declarado != digest:
+            raise RecoveryBlocked(
+                f"a fonte nao e a publicacao declarada: sha256 {digest}, "
+                f"declarado {declarado}")
+        if not publication_url:
+            raise RecoveryBlocked(
+                "--publication-sha256 exige --publication-url: um digest "
+                "sem a publicacao que ele identifica nao e proveniencia")
 
     cfg = target_config()
     conn = psycopg2.connect(connect_timeout=5, **cfg)
@@ -1112,6 +1146,8 @@ def run(session_id: int, csv_path: Path, series_key: str,
                 "fonte_sha256": digest,
                 "manifesto": (f"{manifest_path} ({len(manifest)} entradas)"
                               if manifest is not None else "nao usado"),
+                "proveniencia": (publication_url if publication_url
+                                 else "nao declarada — source_url fica nula"),
                 "linhas_na_fonte": len(rows),
                 "antes": antes.as_dict(),
                 "pareados": len(plano.matched),
@@ -1139,7 +1175,8 @@ def run(session_id: int, csv_path: Path, series_key: str,
 
             relatorio.update(recover_session(
                 cur, session_id, rows, series_key, plano, allow_new_drivers,
-                allow_team_fill, manifest, slot_context))
+                allow_team_fill, manifest, slot_context,
+                source_url=publication_url))
             relatorio["depois"] = session_state(cur, session_id).as_dict()
         conn.commit()
         return relatorio
@@ -1161,7 +1198,11 @@ def main() -> int:
                     help="arquivo de resolucoes de piloto; sem ele, varios "
                          "candidatos continuam bloqueando")
     ap.add_argument("--publication-url", help="a URL oficial desta publicacao, "
-                                              "exigida com --manifest")
+                                              "exigida com --manifest; "
+                                              "gravada em results.source_url")
+    ap.add_argument("--publication-sha256",
+                    help="o sha256 que essa URL publica; exigido junto de "
+                         "--publication-url e conferido contra o arquivo")
     ap.add_argument("--fill-absent-team", action="store_true",
                     help="autoriza escrever a equipe publicada sobre o "
                          "marcador `Unknown`; desligado por padrao")
@@ -1183,7 +1224,8 @@ def main() -> int:
     try:
         relatorio = run(args.session_id, args.csv, args.series, args.dry_run,
                         args.allow_new_drivers, args.fill_absent_team,
-                        args.manifest, args.publication_url)
+                        args.manifest, args.publication_url,
+                        args.publication_sha256)
     except RecoveryBlocked as exc:
         print(f"BLOQUEADO: {exc}")
         return 2
