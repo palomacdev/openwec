@@ -28,6 +28,9 @@ not an argument.
 
 ## The gates
 
+  0. no one else is writing to the tables this touches — a `LOCK TABLE ...
+     IN SHARE ROW EXCLUSIVE MODE NOWAIT` taken before any snapshot, which
+     readers do not conflict with, so the API keeps serving;
   1. the session asked for is one of the allowlisted ones;
   2. a backup file exists, is a PostgreSQL custom-format archive, and its
      attestation proves it: the hash describes that file, it was captured
@@ -49,10 +52,18 @@ not an argument.
  10. the advisory lock is free, so two runs cannot overlap;
  11. the operator confirms the session and the cluster, interactively.
 
-Everything happens in one transaction. After the write and before the commit
-the invariants are checked again against the database itself; a single
-failure rolls the whole thing back. A `ROLLBACK` is not a recovery plan after
-a `COMMIT`, which is why gate 2 exists and why the report names the backup.
+Everything happens in one transaction, at REPEATABLE READ, so the checks,
+the write and the checks afterwards all see one snapshot. After the write
+and before the commit the invariants are checked again against the database
+itself; a single failure rolls the whole thing back. A `ROLLBACK` is not a
+recovery plan after a `COMMIT`, which is why gate 2 exists and why the
+report names the backup.
+
+Gate 0 is not decoration. The advisory lock in `preflight` coordinates only
+runs that take it, which an ingestion, an analytics job or a `psql` session
+does not — and two of the tables here carry a `car_id` with no foreign key
+behind it, so a row written into them after the pre-validation would outlive
+the car it names and nothing in the database would say so.
 
 ## Provenance
 
@@ -180,6 +191,43 @@ SESSOES: dict[int, SessaoAutorizada] = {
 }
 
 ALLOWED_SESSIONS = frozenset(SESSOES)
+
+WRITE_BLOCKING_LOCK = "SHARE ROW EXCLUSIVE"
+LOCK_NOT_AVAILABLE = "55P03"
+
+# Every table a run writes, or reads and then depends on, with the reason it
+# is in this list. The advisory lock below coordinates only executors that
+# take it; this is what stops an ingestion, an analytics job or a `psql`
+# session.
+#
+# `MEASURED` on a disposable copy, before this list existed: an
+# `analytics_car_session` row inserted by another connection *after*
+# `external_references` had checked, naming a car the plan was about to
+# remove, survived the delete as a dangling reference — and the run reported
+# COMMIT. Nothing complained, because that column carries no foreign key,
+# and the API joins it to `cars` with an inner join, so the car simply
+# disappears from the response.
+LOCKED_TABLES = (
+    "results",                # reescrita inteira da sessao
+    "result_drivers",         # apagada por cascata e reinserida
+    "cars",                   # removidos e preenchidos
+    "drivers",                # pode ganhar linha
+    "laps",                   # nunca escrita, mas o plano e duas invariantes dependem dela
+    "analytics_car_session",  # car_id sem FK
+    "analytics_stints",       # car_id sem FK
+)
+
+WRITERS_SQL = """
+SELECT DISTINCT a.pid, a.usename, a.application_name, a.state,
+       l.mode, c.relname
+FROM pg_locks l
+JOIN pg_class c ON c.oid = l.relation
+LEFT JOIN pg_stat_activity a ON a.pid = l.pid
+WHERE c.relname = ANY(%s)
+  AND l.pid <> pg_backend_pid()
+  AND l.mode NOT IN ('AccessShareLock', 'RowShareLock')
+ORDER BY 1, 6
+"""
 
 
 def autorizada(session_id: int) -> SessaoAutorizada:
@@ -360,6 +408,46 @@ def drivers_total(cur) -> int:
     return cur.fetchone()[0]
 
 
+def writer_sessions(cur) -> list[dict]:
+    """
+    Who is holding a lock on these tables that a writer would hold.
+
+    ACCESS SHARE and ROW SHARE are left out: those are readers, and readers
+    are not what this has to stop — the API keeps serving throughout.
+    """
+    cur.execute(WRITERS_SQL, (list(LOCKED_TABLES),))
+    return [{"pid": pid, "usuario": usuario, "aplicacao": app,
+             "estado": estado, "modo": modo, "tabela": tabela}
+            for pid, usuario, app, estado, modo, tabela in cur.fetchall()]
+
+
+def lock_out_writers(conn, cur) -> None:
+    """
+    Keep every other writer off these tables for the rest of the transaction.
+
+    NOWAIT on purpose: a queued lock request blocks the readers that arrive
+    behind it, so waiting for a busy table would take the API down with it.
+    When the lock is not free the run refuses and names who had it.
+    """
+    try:
+        cur.execute(f"LOCK TABLE {', '.join(LOCKED_TABLES)} "
+                    f"IN {WRITE_BLOCKING_LOCK} MODE NOWAIT")
+        return
+    except Exception as exc:                                   # noqa: BLE001
+        if getattr(exc, "pgcode", None) != LOCK_NOT_AVAILABLE:
+            raise
+    # The failed LOCK aborted the transaction, so who holds it has to be
+    # asked in a new one. Nothing was written either way.
+    conn.rollback()
+    with conn.cursor() as outro:
+        escritores = writer_sessions(outro)
+    conn.rollback()
+    raise HistoricalBlocked(
+        f"ha escritor ativo nas tabelas da recuperacao; nada foi feito. "
+        f"Sessoes: {escritores or 'o lock nao estava livre e ninguem aparece '
+                                  'em pg_locks agora'}")
+
+
 def preflight(cur, session_id: int, rows: list[dict], cluster_declarado: str,
               backup: dict | None = None,
               allow_new_drivers: bool = False) -> dict:
@@ -474,8 +562,19 @@ def preflight(cur, session_id: int, rows: list[dict], cluster_declarado: str,
 
 # ── Post-write invariants ────────────────────────────────────
 
-def post_invariants(cur, session_id: int, pre: dict) -> list[str]:
-    """What must be true before the commit. An empty list is the only pass."""
+def post_invariants(cur, session_id: int, pre: dict,
+                    pilotos_criados: int) -> list[str]:
+    """
+    What must be true before the commit. An empty list is the only pass.
+
+    `pilotos_criados` is what the write path reports having created, not the
+    difference between two counts of `drivers`. `MEASURED` on a disposable
+    copy: a single unrelated `INSERT INTO drivers` from another connection,
+    during the run, made the difference read thirteen and rolled back a
+    correct recovery, blaming a driver that had nothing to do with this
+    session. The table is global; its size is not a measurement of what this
+    transaction did.
+    """
     plano_autorizado = autorizada(session_id)
     falhas: list[str] = []
 
@@ -525,10 +624,9 @@ def post_invariants(cur, session_id: int, pre: dict) -> list[str]:
     # Exactly the declared number, in either direction. One more means the
     # source or the database is not what was rehearsed; one fewer means a
     # slot silently went unlinked.
-    criados = drivers_total(cur) - pre["drivers_antes"]
-    if criados != pre["pilotos_novos_previstos"]:
+    if pilotos_criados != pre["pilotos_novos_previstos"]:
         falhas.append(
-            f"{criados} pilotos criados, esperado "
+            f"{pilotos_criados} pilotos criados, esperado "
             f"{pre['pilotos_novos_previstos']}")
 
     digest, quantas = other_sessions_digest(cur, session_id)
@@ -697,6 +795,19 @@ def execute(cfg: dict, session_id: int, csv_path: Path, backup_path: Path,
     conn.autocommit = False
     try:
         with conn.cursor() as cur:
+            # One snapshot for the whole run. At READ COMMITTED each
+            # statement takes a new one, so the state `preflight` validated
+            # would not be the state the write operates on, and the
+            # invariants afterwards would be reading a third.
+            cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+
+            # And before that snapshot is taken, the door. A dry-run holds
+            # nothing and instead says who would have to stop.
+            if dry_run:
+                relatorio["escritores_concorrentes"] = writer_sessions(cur)
+            else:
+                lock_out_writers(conn, cur)
+
             pre = preflight(cur, session_id, rows, cluster_declarado, backup,
                             allow_new_drivers)
             plano = pre.pop("plano")
@@ -722,7 +833,9 @@ def execute(cfg: dict, session_id: int, csv_path: Path, backup_path: Path,
             if falha_simulada:
                 raise HistoricalBlocked(f"falha simulada: {falha_simulada}")
 
-            falhas = post_invariants(cur, session_id, pre)
+            falhas = post_invariants(
+                cur, session_id, pre,
+                relatorio["recuperacao"]["pilotos_criados"])
             relatorio["invariantes"] = falhas or ["todas satisfeitas"]
             if falhas:
                 raise HistoricalBlocked(

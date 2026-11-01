@@ -996,6 +996,10 @@ def recover_session(cur, session_id: int, rows: list[dict], series_key: str,
     pilotos_ambiguos = 0
     pilotos_na_fonte = 0
     pilotos_por_manifesto = 0
+    # Which rows *this* transaction put in `drivers`. Counting the table
+    # before and after would measure every other connection too, and
+    # `drivers` is global.
+    pilotos_criados: set[int] = set()
 
     for numero in sorted(identidades, key=lambda n: int(n) if n.isdigit() else 0):
         row = por_numero[numero]
@@ -1051,6 +1055,8 @@ def recover_session(cur, session_id: int, rows: list[dict], series_key: str,
             driver_id, desfecho = upsert_driver(cur, piloto)
             if driver_id:
                 ligados.append((piloto["slot"], driver_id))
+                if desfecho is DriverOutcome.NOT_FOUND:
+                    pilotos_criados.add(driver_id)
             elif desfecho is DriverOutcome.MULTIPLE_CANDIDATES:
                 pilotos_ambiguos += 1
         if ligados:
@@ -1071,6 +1077,8 @@ def recover_session(cur, session_id: int, rows: list[dict], series_key: str,
         "pilotos_ligados": pilotos_ligados,
         "pilotos_ambiguos": pilotos_ambiguos,
         "pilotos_por_manifesto": pilotos_por_manifesto,
+        "pilotos_criados": len(pilotos_criados),
+        "ids_dos_pilotos_criados": sorted(pilotos_criados),
     }
 
 

@@ -510,14 +510,15 @@ ANTES = {"outras_sessoes": {"digest": "abc", "quantas": 5424},
 
 def depois_de(estado: tuple, sem_resultado: int = 0, sem_posicao: int = 0,
               digest: str = "abc", quantas: int = 5424,
-              sem_proveniencia: int = 0, drivers: int = 2845) -> CursorFalso:
+              sem_proveniencia: int = 0) -> CursorFalso:
     return CursorFalso([[estado], [(sem_resultado,)], [(sem_posicao,)],
-                        [(sem_proveniencia, estado[0])], [(drivers,)],
+                        [(sem_proveniencia, estado[0])],
                         [(digest, quantas)]])
 
 
 def test_o_estado_esperado_nao_deixa_falha():
-    assert post_invariants(depois_de((28, 28, 54, 1554, 28)), 2226, ANTES) == []
+    assert post_invariants(
+        depois_de((28, 28, 54, 1554, 28)), 2226, ANTES, 0) == []
 
 
 @pytest.mark.parametrize("estado,trecho", [
@@ -527,31 +528,31 @@ def test_o_estado_esperado_nao_deixa_falha():
     ((28, 28, 0, 1554, 28), "nenhum piloto"),
 ])
 def test_o_estado_errado_vira_falha(estado, trecho):
-    falhas = post_invariants(depois_de(estado), 2226, ANTES)
+    falhas = post_invariants(depois_de(estado), 2226, ANTES, 0)
     assert any(trecho in f for f in falhas)
 
 
 def test_o_carro_com_voltas_sem_resultado_e_falha():
     falhas = post_invariants(
-        depois_de((28, 28, 54, 1554, 28), sem_resultado=1), 2226, ANTES)
+        depois_de((28, 28, 54, 1554, 28), sem_resultado=1), 2226, ANTES, 0)
     assert any("sem resultado" in f for f in falhas)
 
 
 def test_classificado_sem_posicao_e_falha():
     falhas = post_invariants(
-        depois_de((28, 28, 54, 1554, 28), sem_posicao=2), 2226, ANTES)
+        depois_de((28, 28, 54, 1554, 28), sem_posicao=2), 2226, ANTES, 0)
     assert any("sem posicao" in f for f in falhas)
 
 
 def test_outra_sessao_alterada_e_falha():
     falhas = post_invariants(
-        depois_de((28, 28, 54, 1554, 28), digest="outro"), 2226, ANTES)
+        depois_de((28, 28, 54, 1554, 28), digest="outro"), 2226, ANTES, 0)
     assert any("outra sessao" in f for f in falhas)
 
 
 def test_sessao_a_mais_ou_a_menos_e_falha():
     falhas = post_invariants(
-        depois_de((28, 28, 54, 1554, 28), quantas=5425), 2226, ANTES)
+        depois_de((28, 28, 54, 1554, 28), quantas=5425), 2226, ANTES, 0)
     assert any("numero de sessoes" in f for f in falhas)
 
 
@@ -559,7 +560,7 @@ def test_sessao_a_mais_ou_a_menos_e_falha():
 
 def test_linha_sem_a_url_da_publicacao_e_falha():
     falhas = post_invariants(
-        depois_de((28, 28, 54, 1554, 28), sem_proveniencia=3), 2226, ANTES)
+        depois_de((28, 28, 54, 1554, 28), sem_proveniencia=3), 2226, ANTES, 0)
     assert any("source_url" in f for f in falhas)
 
 
@@ -569,7 +570,7 @@ def test_a_url_conferida_e_a_da_allowlist_nao_apenas_nao_nula():
     other URL fails exactly as a null row does.
     """
     cur = depois_de((28, 28, 54, 1554, 28))
-    post_invariants(cur, 2226, ANTES)
+    post_invariants(cur, 2226, ANTES, 0)
     sql, params = next((s, p) for s, p in cur.executados if "source_url" in s)
     assert params[0] == SESSOES[2226].source_url
     assert "IS DISTINCT FROM" in sql
@@ -577,8 +578,8 @@ def test_a_url_conferida_e_a_da_allowlist_nao_apenas_nao_nula():
 
 def test_a_proveniencia_da_2217_e_conferida_contra_a_url_dela():
     antes = {**ANTES, "pilotos_novos_previstos": 12, "drivers_antes": 2823}
-    cur = depois_de((19, 19, 38, 1155, 19), drivers=2835)
-    assert post_invariants(cur, 2217, antes) == []
+    cur = depois_de((19, 19, 38, 1155, 19))
+    assert post_invariants(cur, 2217, antes, 12) == []
     _, params = next((s, p) for s, p in cur.executados if "source_url" in s)
     assert params[0] == SESSOES[2217].source_url
 
@@ -593,14 +594,14 @@ def test_a_proveniencia_da_2217_e_conferida_contra_a_url_dela():
 def test_criar_numero_diferente_de_pilotos_e_falha(criados, trecho):
     antes = {**ANTES, "pilotos_novos_previstos": 12, "drivers_antes": 2823}
     falhas = post_invariants(
-        depois_de((19, 19, 38, 1155, 19), drivers=2823 + criados), 2217, antes)
+        depois_de((19, 19, 38, 1155, 19)), 2217, antes, criados)
     assert any(trecho in f for f in falhas)
 
 
 def test_um_piloto_criado_onde_nenhum_era_previsto_e_falha():
     """2226 declares zero, so one is a refusal and not a rounding."""
     falhas = post_invariants(
-        depois_de((28, 28, 54, 1554, 28), drivers=2846), 2226, ANTES)
+        depois_de((28, 28, 54, 1554, 28)), 2226, ANTES, 1)
     assert any("1 pilotos criados, esperado 0" in f for f in falhas)
 
 
@@ -613,7 +614,86 @@ def test_a_reexecucao_espera_zero_pilotos_novos():
     """
     antes = {**ANTES, "pilotos_novos_previstos": 0, "drivers_antes": 2835}
     assert post_invariants(
-        depois_de((19, 19, 38, 1155, 19), drivers=2835), 2217, antes) == []
+        depois_de((19, 19, 38, 1155, 19)), 2217, antes, 0) == []
+
+
+def test_a_contagem_de_pilotos_nao_consulta_a_tabela_inteira():
+    """
+    The number comes from the write path, not from `count(*) FROM drivers`.
+
+    `MEASURED` on a disposable copy: one unrelated `INSERT INTO drivers`
+    from another connection, while the run was waiting for the operator,
+    made the before-and-after difference read thirteen and rolled back a
+    correct recovery. `drivers` is a global table; its size is not a
+    measurement of what this transaction did.
+    """
+    antes = {**ANTES, "pilotos_novos_previstos": 12, "drivers_antes": 2823}
+    cur = depois_de((19, 19, 38, 1155, 19))
+    assert post_invariants(cur, 2217, antes, 12) == []
+    assert "FROM drivers" not in cur.sql
+
+
+# ── Nothing else writes while this runs ──────────────────────
+
+def test_o_lock_cobre_as_tabelas_sem_chave_estrangeira():
+    """
+    `analytics_car_session` and `analytics_stints` carry a `car_id` with no
+    foreign key behind it.
+
+    `MEASURED` on a disposable copy: a row inserted into
+    `analytics_car_session` by another connection, after `external_references`
+    had checked and while the run waited for the operator, named a car the
+    plan then removed. The run reported COMMIT and left the reference
+    dangling — nothing complained, and the API's inner join simply drops the
+    car from the response.
+    """
+    assert "analytics_car_session" in hist.LOCKED_TABLES
+    assert "analytics_stints" in hist.LOCKED_TABLES
+
+
+def test_o_lock_cobre_tudo_o_que_a_recuperacao_escreve_ou_depende():
+    assert set(hist.LOCKED_TABLES) == {
+        "results", "result_drivers", "cars", "drivers", "laps",
+        "analytics_car_session", "analytics_stints"}
+
+
+def test_o_lock_nao_bloqueia_leitores():
+    """
+    SHARE ROW EXCLUSIVE conflicts with ROW EXCLUSIVE, which every writer
+    takes, and not with ACCESS SHARE, which readers take. The API keeps
+    serving for the twenty seconds this runs.
+    """
+    assert hist.WRITE_BLOCKING_LOCK == "SHARE ROW EXCLUSIVE"
+
+
+def test_o_lock_e_nowait():
+    """
+    A queued lock request blocks the readers arriving behind it, so waiting
+    for a busy table would take the API down with it.
+    """
+    fonte = Path(hist.__file__).read_text(encoding="utf-8")
+    assert "MODE NOWAIT" in fonte
+
+
+def test_a_transacao_e_repeatable_read():
+    """
+    At READ COMMITTED every statement takes a new snapshot, so the state
+    `preflight` validated would not be the state the write operates on.
+    """
+    fonte = Path(hist.__file__).read_text(encoding="utf-8")
+    assert "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ" in fonte
+
+
+def test_o_executor_irmao_ja_fazia_as_duas_coisas():
+    """
+    This is not a new pattern: `dedup_execute`, in this same package and for
+    the same kind of operation, already locked the tables and ran at
+    REPEATABLE READ. The production path was the one that did not.
+    """
+    import database.recovery.dedup_execute as dedup
+    irmao = Path(dedup.__file__).read_text(encoding="utf-8")
+    assert "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ" in irmao
+    assert dedup.WRITE_BLOCKING_LOCK == hist.WRITE_BLOCKING_LOCK
 
 
 # ── The rehearsal guard is not weakened ──────────────────────
